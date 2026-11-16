@@ -23,7 +23,11 @@ import type {
 } from '../types';
 import { formatDateTimeId, formatRupiah, ISSUER_META } from '../lib/formatters';
 import { compressImageToDataUrl } from '../lib/imageUtils';
-import { getNfcCapabilities, startWebNfcScan } from '../lib/nfc';
+import {
+  getNfcCapabilities,
+  inferIssuerFromCardNumberPrefix,
+  startWebNfcScan,
+} from '../lib/nfc';
 
 interface NfcScannerPanelProps {
   isPremium: boolean;
@@ -32,11 +36,13 @@ interface NfcScannerPanelProps {
   onSelectCard: (cardId: string) => void;
   onSaveCardFromScan: (payload: {
     uid: string;
+    cardNumberFull?: string;
     issuer: CardIssuer;
     label: string;
     balance: number;
     readSource: 'web_nfc' | 'simulasi';
   }) => Promise<EMoneyCard>;
+  onDeleteCard?: (cardId: string) => Promise<void>;
   onRecordTransaction: (payload: {
     cardId: string;
     type: TransactionType;
@@ -107,17 +113,31 @@ export function NfcScannerPanel({
   onSelectCard,
   onSaveCardFromScan,
   onRecordTransaction,
+  onDeleteCard,
   onRequireUpgrade,
 }: NfcScannerPanelProps) {
   const caps = getNfcCapabilities();
   const [isScanning, setIsScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
+  const [scanInfoNote, setScanInfoNote] = useState<string | null>(null);
   const [lastScan, setLastScan] = useState<NfcScanResult | null>(null);
   const [matchedCard, setMatchedCard] = useState<EMoneyCard | null>(null);
+  const [quickPreview, setQuickPreview] = useState<{
+    uid: string;
+    issuer: CardIssuer;
+    label: string;
+    balance: number;
+    merchant: string;
+    location: string;
+    category: TransactionCategory;
+    amount: number;
+    timestamp: string;
+  } | null>(null);
   const [tapCountSession, setTapCountSession] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
 
   const [newIssuer, setNewIssuer] = useState<CardIssuer>('mandiri');
+  const [newCardNumber, setNewCardNumber] = useState('');
   const [newLabel, setNewLabel] = useState('Kartu e-Money Kantor');
   const [newBalance, setNewBalance] = useState('150000');
   const [savingCard, setSavingCard] = useState(false);
@@ -147,13 +167,60 @@ export function NfcScannerPanel({
     };
   }, []);
 
+  function focusResultPanel() {
+    setTimeout(() => {
+      document
+        .getElementById('nfc-result-panel')
+        ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }, 80);
+  }
+
+  function applyDetectedScanResult(result: NfcScanResult, nonNdefNote?: string) {
+    setLastScan(result);
+    setQuickPreview(null);
+    setTapCountSession((n) => n + 1);
+
+    const existing = cards.find(
+      (c) => c.uid.toUpperCase() === result.uid.toUpperCase(),
+    );
+    if (existing) {
+      setMatchedCard(existing);
+      onSelectCard(existing.id);
+      setScanInfoNote(nonNdefNote || null);
+      setFeedbackBanner(
+        `Kartu dikenali: ${ISSUER_META[existing.issuer].name} (${existing.uid}) · Saldo ${formatRupiah(existing.balance)}.`,
+      );
+    } else {
+      setMatchedCard(null);
+      setNewIssuer(result.issuerGuess);
+      setNewLabel(`${ISSUER_META[result.issuerGuess].name} Saya`);
+      setNewBalance(String(result.parsedBalance ?? 100000));
+      setScanInfoNote(
+        nonNdefNote ||
+          (result.nonNdefChip
+            ? 'UID kartu fisik berhasil dibaca! Karena kartu bank (e-Money / Flazz / Brizzi / TapCash) tidak menyimpan saldo pada tag NDEF standar browser, pilih jenis kartu dan masukkan saldo terkini dari struk/m-banking untuk menyimpannya.'
+            : null),
+      );
+      setFeedbackBanner(
+        result.parsedBalance !== undefined
+          ? `UID & data kartu terdeteksi (${result.uid}) · Saldo ${formatRupiah(result.parsedBalance)}.`
+          : `Kartu NFC fisik terdeteksi (${result.uid}). Lengkapi jenis kartu & saldo di sebelah kanan.`,
+      );
+    }
+
+    setIsScanning(false);
+    abortRef.current?.abort();
+    focusResultPanel();
+  }
+
   async function handleStartNfc() {
     setScanError(null);
+    setScanInfoNote(null);
     setFeedbackBanner(null);
 
     if (!caps.supported) {
       setScanError(
-        'Browser perangkat ini belum mendukung Web NFC (NDEFReader). Gunakan Google Chrome di perangkat Android untuk tap kartu fisik, atau gunakan Simulasi Tap Kartu di bawah.',
+        'Browser perangkat ini tidak mendukung Web NFC (NDEFReader). Gunakan Google Chrome di perangkat Android (bukan tab pratinjau/iframe), atau pilih Input Kartu Fisik / Simulasi di bawah.',
       );
       return;
     }
@@ -167,30 +234,10 @@ export function NfcScannerPanel({
       await startWebNfcScan(
         controller.signal,
         (result) => {
-          setLastScan(result);
-          setTapCountSession((n) => n + 1);
-          const existing = cards.find(
-            (c) => c.uid.toUpperCase() === result.uid.toUpperCase(),
-          );
-          if (existing) {
-            setMatchedCard(existing);
-            onSelectCard(existing.id);
-            setFeedbackBanner(
-              `Cek saldo gratis terbaca: ${ISSUER_META[existing.issuer].name} (${existing.uid}) · Saldo ${formatRupiah(existing.balance)}.`,
-            );
-          } else {
-            setMatchedCard(null);
-            setNewIssuer(result.issuerGuess);
-            setNewBalance(String(result.parsedBalance ?? 100000));
-            setFeedbackBanner(
-              `UID kartu baru terdeteksi (${result.uid}) · Estimasi saldo ${formatRupiah(result.parsedBalance ?? 100000)}.`,
-            );
-          }
-          setIsScanning(false);
-          controller.abort();
+          applyDetectedScanResult(result);
         },
-        (msg) => {
-          setScanError(msg);
+        (result, note) => {
+          applyDetectedScanResult(result, note);
         },
       );
     } catch (err) {
@@ -200,7 +247,7 @@ export function NfcScannerPanel({
         err instanceof Error ? err.message : 'Gagal mengaktifkan sensor NFC.';
       if (message.toLowerCase().includes('permission') || caps.inIframe) {
         setScanError(
-          'Akses NFC dibatasi di dalam frame pratinjau. Buka URL aplikasi ini langsung di tab baru Chrome Android untuk memindai kartu fisik.',
+          'Akses sensor NFC dibatasi di dalam iframe pratinjau. Klik "Buka Tab Penuh" di samping untuk menempelkan kartu Mandiri e-Money / BCA Flazz secara langsung.',
         );
       } else {
         setScanError(message);
@@ -213,8 +260,33 @@ export function NfcScannerPanel({
     setIsScanning(false);
   }
 
+  function handleOpenManualPhysicalCard(presetIssuer: CardIssuer = 'mandiri') {
+    setScanError(null);
+    setScanInfoNote(
+      'Mode input kartu fisik: masukkan 4–16 digit awal nomor kartu (opsional) atau pilih Mandiri e-Money / BCA Flazz, lalu masukkan saldo terakhir kartu.',
+    );
+    const uid = `NFC-${Math.random().toString(16).slice(2, 6).toUpperCase()}:${Math.random().toString(16).slice(2, 6).toUpperCase()}`;
+    setLastScan({
+      uid,
+      serialNumber: uid,
+      issuerGuess: presetIssuer,
+      recordsCount: 0,
+      nonNdefChip: true,
+      timestamp: new Date().toISOString(),
+      source: 'web_nfc',
+    });
+    setMatchedCard(null);
+    setQuickPreview(null);
+    setNewIssuer(presetIssuer);
+    setNewCardNumber('');
+    setNewLabel(`${ISSUER_META[presetIssuer].name} Fisik`);
+    setNewBalance('150000');
+    focusResultPanel();
+  }
+
   async function handleSimulateTap(preset: (typeof PRESET_SCANS)[number]) {
     setScanError(null);
+    setScanInfoNote(null);
     const simulated: NfcScanResult = {
       uid: preset.uid,
       serialNumber: preset.uid,
@@ -229,9 +301,22 @@ export function NfcScannerPanel({
     let card = cards.find((c) => c.uid.toUpperCase() === preset.uid.toUpperCase());
     if (!card) {
       if (!isPremium && cards.length >= 2) {
+        setMatchedCard(null);
+        setQuickPreview({
+          uid: preset.uid,
+          issuer: preset.issuer,
+          label: preset.label,
+          balance: 250000,
+          merchant: preset.merchant,
+          location: preset.location,
+          category: preset.category,
+          amount: preset.amount,
+          timestamp: simulated.timestamp,
+        });
         setFeedbackBanner(
-          `Cek saldo cepat (tanpa simpan): ${ISSUER_META[preset.issuer].name} (${preset.uid}) · Saldo estimasi Rp 250.000. Slot simpan Paket Gratis penuh (2/2).`,
+          `Cek saldo cepat (tanpa simpan): ${ISSUER_META[preset.issuer].name} (${preset.uid}) · Saldo Rp 250.000.`,
         );
+        focusResultPanel();
         return;
       }
       card = await onSaveCardFromScan({
@@ -242,6 +327,7 @@ export function NfcScannerPanel({
         readSource: 'simulasi',
       });
     }
+    setQuickPreview(null);
     setMatchedCard(card);
     onSelectCard(card.id);
     setTxType('debit');
@@ -252,29 +338,48 @@ export function NfcScannerPanel({
     setFeedbackBanner(
       `Tap NFC terbaca (cek saldo tanpa batas): ${ISSUER_META[card.issuer].name} · Saldo ${formatRupiah(card.balance)}.`,
     );
+    focusResultPanel();
   }
 
-  async function handleRegisterUnknownCard(e: React.FormEvent) {
+  async function handleRegisterUnknownCard(e: React.FormEvent, replaceOldestSlot = false) {
     e.preventDefault();
-    if (!lastScan) return;
-    if (!isPremium && cards.length >= 2) {
+    if (!lastScan && !quickPreview) return;
+
+    const targetUid = quickPreview?.uid || lastScan?.uid || '';
+    const targetIssuer = quickPreview?.issuer || newIssuer;
+    const targetLabel =
+      quickPreview?.label || newLabel.trim() || `${ISSUER_META[targetIssuer].name}`;
+    const targetBalance = quickPreview?.balance ?? (Number(newBalance) || 0);
+    const cleanDigits = newCardNumber.replace(/\D/g, '');
+
+    if (!isPremium && cards.length >= 2 && !replaceOldestSlot) {
       onRequireUpgrade(
-        'Paket Gratis dibatasi maksimal 2 kartu tersimpan. Upgrade ke Paket Premium (mulai 5K/minggu) untuk menyimpan semua kartu Anda.',
+        'Paket Gratis dibatasi maksimal 2 kartu tersimpan. Upgrade ke Paket Premium (mulai 5K/minggu) untuk menyimpan semua kartu, atau pilih ganti salah satu kartu demo.',
       );
       return;
     }
+
     setSavingCard(true);
     setScanError(null);
     try {
+      if (!isPremium && cards.length >= 2 && replaceOldestSlot && onDeleteCard) {
+        const oldest = cards[cards.length - 1];
+        if (oldest) {
+          await onDeleteCard(oldest.id);
+        }
+      }
       const saved = await onSaveCardFromScan({
-        uid: lastScan.uid,
-        issuer: newIssuer,
-        label: newLabel.trim() || `${ISSUER_META[newIssuer].name}`,
-        balance: Number(newBalance) || 0,
-        readSource: lastScan.source,
+        uid: targetUid,
+        cardNumberFull: cleanDigits.length >= 12 ? cleanDigits : undefined,
+        issuer: targetIssuer,
+        label: targetLabel,
+        balance: targetBalance,
+        readSource: lastScan?.source || 'web_nfc',
       });
+      setQuickPreview(null);
       setMatchedCard(saved);
       onSelectCard(saved.id);
+      setScanInfoNote(null);
       setFeedbackBanner(`Kartu ${saved.label} tersimpan dan siap dilacak real-time.`);
     } catch (err) {
       setScanError(err instanceof Error ? err.message : 'Gagal menyimpan kartu');
@@ -415,6 +520,14 @@ export function NfcScannerPanel({
               </a>
             )}
           </div>
+
+          <button
+            type="button"
+            onClick={() => handleOpenManualPhysicalCard('mandiri')}
+            className="mt-3 text-xs font-semibold text-blue-600 hover:text-blue-700 cursor-pointer"
+          >
+            Atau input manual kartu fisik (e-Money / Flazz)
+          </button>
         </div>
 
         {scanError && (
@@ -424,6 +537,13 @@ export function NfcScannerPanel({
           >
             <span className="font-semibold">Info NFC: </span>
             {scanError}
+          </div>
+        )}
+
+        {scanInfoNote && (
+          <div className="mt-4 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-xs text-blue-950 leading-relaxed">
+            <span className="font-semibold">Catatan Chip Bank: </span>
+            {scanInfoNote}
           </div>
         )}
 
@@ -465,8 +585,80 @@ export function NfcScannerPanel({
       </div>
 
       {/* Right Column: Active Card Result & Real-Time Mutation Form */}
-      <div className="lg:col-span-7 bg-white border border-slate-200 rounded-2xl p-6">
-        {lastScan && !matchedCard ? (
+      <div
+        id="nfc-result-panel"
+        className="lg:col-span-7 bg-white border border-slate-200 rounded-2xl p-6 scroll-mt-20"
+      >
+        {quickPreview ? (
+          <div className="space-y-5">
+            <div className="flex items-center justify-between gap-4 pb-4 border-b border-slate-200">
+              <div>
+                <h3 className="text-base font-bold text-slate-900 font-display">
+                  Hasil Cek Saldo Cepat (Tanpa Simpan)
+                </h3>
+                <p className="mt-0.5 text-xs text-slate-600 font-mono tabular-nums">
+                  UID {quickPreview.uid} · {formatDateTimeId(quickPreview.timestamp)}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setQuickPreview(null)}
+                className="text-xs font-medium text-slate-500 hover:text-slate-900 px-3 py-1.5 rounded-lg hover:bg-slate-100 cursor-pointer"
+              >
+                Tutup
+              </button>
+            </div>
+
+            <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div>
+                <div className="text-xs font-semibold text-blue-700">
+                  {ISSUER_META[quickPreview.issuer].name}
+                </div>
+                <div className="text-base font-bold text-slate-950 mt-0.5">
+                  {quickPreview.label}
+                </div>
+                <div className="text-xs text-slate-500 mt-1">
+                  Contoh transaksi: {quickPreview.merchant} ({formatRupiah(quickPreview.amount)})
+                </div>
+              </div>
+              <div className="sm:text-right shrink-0">
+                <div className="text-[11px] text-slate-500">Saldo Terbaca</div>
+                <div className="text-2xl font-bold font-mono tabular-nums text-slate-950">
+                  {formatRupiah(quickPreview.balance)}
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-950 leading-relaxed">
+              Slot penyimpanan Paket Gratis sudah penuh ({cards.length}/2 kartu). Anda tetap bisa cek saldo tanpa batas, atau ganti salah satu kartu lama agar kartu ini tersimpan di cloud.
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3">
+              {onDeleteCard && cards.length >= 2 && (
+                <button
+                  type="button"
+                  disabled={savingCard}
+                  onClick={(e) => handleRegisterUnknownCard(e, true)}
+                  className="min-h-[44px] px-4 py-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-900 text-xs font-semibold cursor-pointer"
+                >
+                  {savingCard ? 'Mengganti...' : 'Ganti Kartu Lama & Simpan Kartu Ini'}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() =>
+                  onRequireUpgrade(
+                    'Upgrade ke Paket Premium (mulai 5K/minggu) untuk menyimpan semua kartu tanpa batas.',
+                  )
+                }
+                className="min-h-[44px] px-5 py-2.5 rounded-xl bg-neutral-950 hover:bg-neutral-800 text-white text-xs font-semibold inline-flex items-center gap-2 cursor-pointer"
+              >
+                <Crown className="w-4 h-4 text-amber-400" />
+                <span>Upgrade Premium (Simpan Semua)</span>
+              </button>
+            </div>
+          </div>
+        ) : lastScan && !matchedCard ? (
           <div>
             <div className="flex items-center justify-between gap-4 pb-4 border-b border-slate-200">
               <div>
@@ -479,30 +671,62 @@ export function NfcScannerPanel({
               </div>
               <button
                 type="button"
-                onClick={() => setLastScan(null)}
+                onClick={() => {
+                  setLastScan(null);
+                  setScanInfoNote(null);
+                }}
                 className="text-xs font-medium text-slate-500 hover:text-slate-900 px-3 py-1.5 rounded-lg hover:bg-slate-100 cursor-pointer"
               >
                 Batal
               </button>
             </div>
 
-            <form onSubmit={handleRegisterUnknownCard} className="mt-5 space-y-4">
+            <form onSubmit={(e) => handleRegisterUnknownCard(e, false)} className="mt-5 space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                  Pilih Penerbit Kartu
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  {(Object.keys(ISSUER_META) as CardIssuer[]).map((issuerKey) => (
+                    <button
+                      key={issuerKey}
+                      type="button"
+                      onClick={() => {
+                        setNewIssuer(issuerKey);
+                        setNewLabel(`${ISSUER_META[issuerKey].name} Operasional`);
+                      }}
+                      className={`min-h-[38px] px-3 py-1.5 rounded-xl border text-xs font-semibold transition-colors cursor-pointer ${
+                        newIssuer === issuerKey
+                          ? 'border-blue-600 bg-blue-50 text-blue-700'
+                          : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                      }`}
+                    >
+                      {ISSUER_META[issuerKey].name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                    Jenis Kartu e-Money
+                    Nomor Kartu (Opsional · Auto-deteksi)
                   </label>
-                  <select
-                    value={newIssuer}
-                    onChange={(e) => setNewIssuer(e.target.value as CardIssuer)}
-                    className="w-full min-h-[44px] px-3 rounded-xl border border-slate-200 bg-white text-sm text-slate-900 focus:outline-none focus:border-blue-600"
-                  >
-                    <option value="mandiri">Mandiri e-Money</option>
-                    <option value="bca">BCA Flazz</option>
-                    <option value="bri">BRI Brizzi</option>
-                    <option value="bni">BNI TapCash</option>
-                    <option value="kmt">KMT / JakLingko</option>
-                  </select>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    value={newCardNumber}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setNewCardNumber(val);
+                      const detected = inferIssuerFromCardNumberPrefix(val);
+                      if (detected) {
+                        setNewIssuer(detected);
+                      }
+                    }}
+                    placeholder="6032... (Mandiri) / 0148... (Flazz)"
+                    className="w-full min-h-[44px] px-3 rounded-xl border border-slate-200 bg-white text-sm font-mono text-slate-900 focus:outline-none focus:border-blue-600"
+                  />
                 </div>
 
                 <div>
@@ -535,14 +759,39 @@ export function NfcScannerPanel({
                 />
               </div>
 
-              <button
-                type="submit"
-                disabled={savingCard}
-                className="min-h-[44px] px-5 py-2.5 rounded-xl bg-blue-700 hover:bg-blue-800 disabled:opacity-60 text-white text-sm font-semibold inline-flex items-center gap-2 cursor-pointer"
-              >
-                <Plus className="w-4 h-4" />
-                <span>{savingCard ? 'Menyimpan...' : 'Simpan Kartu ke Cloud'}</span>
-              </button>
+              <div className="flex flex-wrap items-center gap-3">
+                {(!isPremium && cards.length >= 2) ? (
+                  <>
+                    {onDeleteCard && (
+                      <button
+                        type="button"
+                        disabled={savingCard}
+                        onClick={(e) => handleRegisterUnknownCard(e, true)}
+                        className="min-h-[44px] px-4 py-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-900 text-xs font-semibold cursor-pointer"
+                      >
+                        {savingCard ? 'Menyimpan...' : 'Ganti Kartu Demo & Simpan Kartu Ini'}
+                      </button>
+                    )}
+                    <button
+                      type="submit"
+                      disabled={savingCard}
+                      className="min-h-[44px] px-5 py-2.5 rounded-xl bg-neutral-950 hover:bg-neutral-800 text-white text-xs font-semibold inline-flex items-center gap-2 cursor-pointer"
+                    >
+                      <Crown className="w-4 h-4 text-amber-400" />
+                      <span>Upgrade Premium untuk Kartu ke-{cards.length + 1}</span>
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="submit"
+                    disabled={savingCard}
+                    className="min-h-[44px] px-5 py-2.5 rounded-xl bg-blue-700 hover:bg-blue-800 disabled:opacity-60 text-white text-sm font-semibold inline-flex items-center gap-2 cursor-pointer"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>{savingCard ? 'Menyimpan...' : 'Simpan Kartu ke Cloud'}</span>
+                  </button>
+                )}
+              </div>
             </form>
           </div>
         ) : selectedCard ? (

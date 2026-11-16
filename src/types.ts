@@ -120,6 +120,7 @@ export interface NfcScanResult {
   recordsCount: number;
   rawText?: string;
   parsedBalance?: number;
+  nonNdefChip?: boolean;
   timestamp: string;
   source: 'web_nfc' | 'simulasi';
 }

@@ -747,6 +747,7 @@ export default function App() {
                   activeCardId={activeCardId}
                   onSelectCard={setActiveCardId}
                   onSaveCardFromScan={handleSaveCard}
+                  onDeleteCard={handleDeleteCard}
                   onRecordTransaction={handleRecordTransaction}
                   onRequireUpgrade={(reason) => setUpgradeReason(reason)}
                 />
