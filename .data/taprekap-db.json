@@ -1,0 +1,305 @@
+{
+  "workspaces": {
+    "KANTOR-ID-01": {
+      "profile": {
+        "workspaceCode": "KANTOR-ID-01",
+        "employeeName": "Raka Pratama",
+        "employeeId": "EMP-20419",
+        "department": "Operasional & Implementasi",
+        "companyName": "PT Nusantara Solusi Digital",
+        "approverName": "Dewi Anggraini (Finance Manager)"
+      },
+      "subscription": {
+        "tier": "free",
+        "billingCycle": null,
+        "activatedAt": null,
+        "expiresAt": null
+      },
+      "cards": [
+        {
+          "id": "card_mandiri_01",
+          "uid": "04:A2:8F:19:4C:52:80",
+          "issuer": "mandiri",
+          "cardNumberMasked": "6032 •••• •••• 4819",
+          "cardNumberFull": "6032981044124819",
+          "verificationCode": "TRK-4C5280-9A1F",
+          "label": "e-Money Operasional Utama",
+          "holderName": "Raka Pratama",
+          "balance": 284500,
+          "lastTappedAt": "2026-11-16T07:22:20.424Z",
+          "readSource": "web_nfc",
+          "createdAt": "2026-11-02T09:15:00.000Z"
+        },
+        {
+          "id": "card_bca_02",
+          "uid": "04:5D:12:CA:91:3A:81",
+          "issuer": "bca",
+          "cardNumberMasked": "0148 •••• •••• 9023",
+          "cardNumberFull": "0148112099349023",
+          "verificationCode": "TRK-913A81-4E2B",
+          "label": "Flazz Kunjungan Klien",
+          "holderName": "Raka Pratama",
+          "balance": 142000,
+          "lastTappedAt": "2026-11-15T17:15:00.000Z",
+          "readSource": "web_nfc",
+          "createdAt": "2026-10-26T09:15:00.000Z"
+        }
+      ],
+      "transactions": [
+        {
+          "id": "tx_01",
+          "cardId": "card_mandiri_01",
+          "cardUid": "04:A2:8F:19:4C:52:80",
+          "issuer": "mandiri",
+          "cardLabel": "e-Money Operasional Utama",
+          "type": "debit",
+          "category": "tol",
+          "merchant": "Gerbang Tol Pasteur (Jasa Marga)",
+          "location": "Bandung, Jawa Barat",
+          "amount": 112000,
+          "balanceAfter": 284500,
+          "timestamp": "2026-11-16T07:22:20.424Z",
+          "reimburseStatus": "unclaimed",
+          "notes": "Perjalanan dinas audit vendor Bandung",
+          "activityCaption": "Kunjungan lokasi gudang vendor Pasteur"
+        },
+        {
+          "id": "tx_02",
+          "cardId": "card_mandiri_01",
+          "cardUid": "04:A2:8F:19:4C:52:80",
+          "issuer": "mandiri",
+          "cardLabel": "e-Money Operasional Utama",
+          "type": "debit",
+          "category": "parkir",
+          "merchant": "Secure Parking Menara Sudirman",
+          "location": "Jakarta Selatan",
+          "amount": 25000,
+          "balanceAfter": 396500,
+          "timestamp": "2026-11-15T15:15:00.000Z",
+          "reimburseStatus": "unclaimed",
+          "notes": "Parkir meeting klien Q4"
+        },
+        {
+          "id": "tx_03",
+          "cardId": "card_bca_02",
+          "cardUid": "04:5D:12:CA:91:3A:81",
+          "issuer": "bca",
+          "cardLabel": "Flazz Kunjungan Klien",
+          "type": "debit",
+          "category": "tol",
+          "merchant": "Gerbang Tol Cikarang Utama",
+          "location": "Bekasi, Jawa Barat",
+          "amount": 27000,
+          "balanceAfter": 142000,
+          "timestamp": "2026-11-15T17:15:00.000Z",
+          "reimburseStatus": "unclaimed",
+          "notes": "Kunjungan pabrik kawasan Jababeka"
+        },
+        {
+          "id": "tx_04",
+          "cardId": "card_mandiri_01",
+          "cardUid": "04:A2:8F:19:4C:52:80",
+          "issuer": "mandiri",
+          "cardLabel": "e-Money Operasional Utama",
+          "type": "debit",
+          "category": "bbm",
+          "merchant": "SPBU Pertamina 31.12902 Gatot Subroto",
+          "location": "Jakarta Selatan",
+          "amount": 150000,
+          "balanceAfter": 421500,
+          "timestamp": "2026-11-14T11:15:00.000Z",
+          "reimburseStatus": "unclaimed",
+          "notes": "Pengisian BBM kendaraan operasional"
+        },
+        {
+          "id": "tx_05",
+          "cardId": "card_mandiri_01",
+          "cardUid": "04:A2:8F:19:4C:52:80",
+          "issuer": "mandiri",
+          "cardLabel": "e-Money Operasional Utama",
+          "type": "debit",
+          "category": "tol",
+          "merchant": "Gerbang Tol Karawang Barat",
+          "location": "Karawang, Jawa Barat",
+          "amount": 46500,
+          "balanceAfter": 571500,
+          "timestamp": "2026-11-13T14:15:00.000Z",
+          "reimburseStatus": "in_batch",
+          "reimburseBatchId": "batch_01",
+          "notes": "Survey cabang regional Jawa Barat"
+        },
+        {
+          "id": "tx_06",
+          "cardId": "card_mandiri_01",
+          "cardUid": "04:A2:8F:19:4C:52:80",
+          "issuer": "mandiri",
+          "cardLabel": "e-Money Operasional Utama",
+          "type": "topup",
+          "category": "topup",
+          "merchant": "Top Up via Livin Mandiri NFC",
+          "location": "Mobile Banking",
+          "amount": 500000,
+          "balanceAfter": 618000,
+          "timestamp": "2026-11-12T10:15:00.000Z",
+          "reimburseStatus": "unclaimed",
+          "notes": "Pengisian saldo operasional bulanan"
+        },
+        {
+          "id": "tx_07",
+          "cardId": "card_bca_02",
+          "cardUid": "04:5D:12:CA:91:3A:81",
+          "issuer": "bca",
+          "cardLabel": "Flazz Kunjungan Klien",
+          "type": "debit",
+          "category": "parkir",
+          "merchant": "Centrepark Grand Indonesia",
+          "location": "Jakarta Pusat",
+          "amount": 32000,
+          "balanceAfter": 169000,
+          "timestamp": "2026-11-12T18:15:00.000Z",
+          "reimburseStatus": "in_batch",
+          "reimburseBatchId": "batch_01",
+          "notes": "Presentasi proposal dengan partner"
+        },
+        {
+          "id": "tx_08",
+          "cardId": "card_mandiri_01",
+          "cardUid": "04:A2:8F:19:4C:52:80",
+          "issuer": "mandiri",
+          "cardLabel": "e-Money Operasional Utama",
+          "type": "debit",
+          "category": "tol",
+          "merchant": "Gerbang Tol Cikampek Utama",
+          "location": "Cikampek, Jawa Barat",
+          "amount": 38000,
+          "balanceAfter": 118000,
+          "timestamp": "2026-11-10T09:15:00.000Z",
+          "reimburseStatus": "unclaimed",
+          "notes": "Perjalanan dinas pekan lalu (arsip >5 transaksi)"
+        }
+      ],
+      "batches": [
+        {
+          "id": "batch_01",
+          "reportNumber": "RMB-2026-11-001",
+          "title": "Reimburse Perjalanan Dinas & Parkir Pekan 1",
+          "employeeName": "Raka Pratama",
+          "employeeId": "EMP-20419",
+          "department": "Operasional & Implementasi",
+          "companyName": "PT Nusantara Solusi Digital",
+          "approverName": "Dewi Anggraini (Finance Manager)",
+          "periodStart": "2026-11-09",
+          "periodEnd": "2026-11-16",
+          "notes": "Pengajuan biaya tol dan parkir kunjungan cabang serta mitra.",
+          "status": "submitted",
+          "transactionIds": [
+            "tx_05",
+            "tx_07"
+          ],
+          "totalAmount": 78500,
+          "createdAt": "2026-11-14T16:15:00.000Z",
+          "updatedAt": "2026-11-14T16:15:00.000Z"
+        }
+      ],
+      "updatedAt": "2026-11-16T09:22:20.424Z",
+      "paymentHistory": []
+    },
+    "TEST-VERIFY": {
+      "profile": {
+        "workspaceCode": "TEST-VERIFY",
+        "employeeName": "Pengguna Gratis",
+        "employeeId": "EMP-001",
+        "department": "Operasional",
+        "companyName": "Nama Perusahaan Anda",
+        "approverName": "Manajer Finance"
+      },
+      "subscription": {
+        "tier": "premium",
+        "billingCycle": "monthly",
+        "activatedAt": "2026-11-16T09:22:27.901Z",
+        "expiresAt": "2026-12-16T09:22:27.901Z"
+      },
+      "cards": [
+        {
+          "id": "card_mwj21uq0_3huuzg",
+          "uid": "CARD-44129999",
+          "issuer": "mandiri",
+          "cardNumberMasked": "6032 •••• •••• 9999",
+          "cardNumberFull": "6032981044129999",
+          "verificationCode": "TRK-129999-E2CB",
+          "label": "Via Nomor",
+          "holderName": "Pengguna Gratis",
+          "balance": 200000,
+          "lastTappedAt": "2026-11-16T09:22:27.912Z",
+          "readSource": "card_number",
+          "createdAt": "2026-11-16T09:22:27.912Z"
+        },
+        {
+          "id": "card_mwj21up7_vc4smt",
+          "uid": "04:11:22:33:44:02",
+          "issuer": "mandiri",
+          "cardNumberMasked": "6032 •••• •••• 4402",
+          "verificationCode": "TRK-334402-TN49",
+          "label": "Kartu 2",
+          "holderName": "Pengguna Gratis",
+          "balance": 100000,
+          "lastTappedAt": "2026-11-16T09:22:27.883Z",
+          "readSource": "web_nfc",
+          "createdAt": "2026-11-16T09:22:27.883Z"
+        },
+        {
+          "id": "card_mwj21uoy_jxbxh0",
+          "uid": "04:11:22:33:44:01",
+          "issuer": "mandiri",
+          "cardNumberMasked": "6032 •••• •••• 4401",
+          "verificationCode": "TRK-334401-DEAP",
+          "label": "Kartu 1",
+          "holderName": "Pengguna Gratis",
+          "balance": 100000,
+          "lastTappedAt": "2026-11-16T09:22:27.874Z",
+          "readSource": "web_nfc",
+          "createdAt": "2026-11-16T09:22:27.874Z"
+        }
+      ],
+      "transactions": [],
+      "batches": [],
+      "updatedAt": "2026-11-16T09:22:27.912Z",
+      "paymentHistory": []
+    },
+    "TEST-QRIS": {
+      "profile": {
+        "workspaceCode": "TEST-QRIS",
+        "employeeName": "Pengguna Gratis",
+        "employeeId": "EMP-001",
+        "department": "Operasional",
+        "companyName": "Nama Perusahaan Anda",
+        "approverName": "Manajer Finance"
+      },
+      "subscription": {
+        "tier": "premium",
+        "billingCycle": "weekly",
+        "activatedAt": "2026-11-16T09:28:04.930Z",
+        "expiresAt": "2026-11-23T09:28:04.930Z"
+      },
+      "cards": [],
+      "transactions": [],
+      "batches": [],
+      "paymentHistory": [
+        {
+          "id": "qris_mwj292qu_rirc87",
+          "orderCode": "QRIS-2611-BEJJ",
+          "billingCycle": "weekly",
+          "amount": 5000,
+          "qrisPayload": "00020101021226670014ID.CO.QRIS.WWW011993600914312018842010215ID10260098412010303UMI520459995303360540450005802ID5918TAPREKAP INDONESIA6007JAKARTA62180514QRIS-2611-BEJJ63047CAD",
+          "merchantName": "TAPREKAP INDONESIA",
+          "nmid": "ID1026009841201",
+          "status": "paid",
+          "createdAt": "2026-11-16T09:28:04.902Z",
+          "expiresAt": "2026-11-16T09:43:04.902Z",
+          "paidAt": "2026-11-16T09:28:04.930Z"
+        }
+      ],
+      "updatedAt": "2026-11-16T09:28:04.930Z"
+    }
+  }
+}

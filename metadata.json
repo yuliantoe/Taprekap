@@ -1,0 +1,6 @@
+{
+  "name": "TapRekap",
+  "description": "Website pembaca kartu e-Money, Flazz, Brizzi, dan TapCash via NFC mobile untuk cek saldo real-time, histori transaksi cloud lintas perangkat, rekap reimburse, dan ekspor laporan PDF kantor.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
