@@ -498,6 +498,68 @@ export function localSaveCard(
   return { card, workspace: next };
 }
 
+export function localLookupCardByTap(
+  ws: WorkspaceData,
+  params: { uid?: string; cardNumber?: string; issuer?: string },
+): {
+  found: boolean;
+  card: EMoneyCard | null;
+  transactions: EMoneyTransaction[];
+  totalTransactionsCount: number;
+  workspace: WorkspaceData;
+} {
+  const next: WorkspaceData = structuredClone(ws);
+  const rawUid = String(params.uid || '').trim().toUpperCase();
+  const rawCardNum = String(params.cardNumber || '').replace(/\D/g, '');
+  const rawIssuer = String(params.issuer || '').trim().toLowerCase();
+
+  let card = next.cards.find((c) => {
+    if (rawUid && c.uid.toUpperCase() === rawUid) return true;
+    if (rawCardNum.length >= 8 && c.cardNumberFull === rawCardNum) return true;
+    return false;
+  });
+
+  if (!card && rawUid) {
+    const compact = rawUid.replace(/[^A-F0-9]/g, '');
+    if (compact.length >= 8) {
+      card = next.cards.find(
+        (c) => c.uid.replace(/[^A-F0-9]/g, '').toUpperCase() === compact,
+      );
+    }
+  }
+
+  if (!card && !rawUid && rawIssuer) {
+    card = next.cards.find((c) => c.issuer === rawIssuer);
+  }
+
+  if (!card) {
+    return {
+      found: false,
+      card: null,
+      transactions: [],
+      totalTransactionsCount: 0,
+      workspace: next,
+    };
+  }
+
+  const now = new Date().toISOString();
+  card.lastTappedAt = now;
+  next.updatedAt = now;
+  writeWorkspaceMirror(next.profile.workspaceCode, next);
+
+  const allCardTxs = next.transactions.filter((t) => t.cardId === card.id);
+  const visibleTxs =
+    next.subscription.tier === 'premium' ? allCardTxs : allCardTxs.slice(0, 5);
+
+  return {
+    found: true,
+    card,
+    transactions: visibleTxs,
+    totalTransactionsCount: allCardTxs.length,
+    workspace: next,
+  };
+}
+
 export function localUpdateCard(
   ws: WorkspaceData,
   id: string,

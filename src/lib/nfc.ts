@@ -47,13 +47,30 @@ export function getNfcCapabilities(): NfcCapabilities {
   let platformHint = 'Desktop / Perangkat Non-NFC';
   if (/Android/i.test(ua)) {
     platformHint = supported
-      ? 'Android Chrome (Web NFC Aktif · Mendukung UID & Tag NDEF)'
+      ? 'Android Chrome (Web NFC Siap · Tempel kartu ke sensor NFC)'
       : 'Android Browser (Gunakan Chrome terbaru untuk Web NFC)';
   } else if (/iPhone|iPad|iPod/i.test(ua)) {
     platformHint = 'iOS Safari (Belum mendukung Web NFC, gunakan Input Kartu / Simulasi)';
   }
 
   return { supported, isSecureContext, inIframe, platformHint };
+}
+
+export async function queryNfcPermissionState(): Promise<
+  'granted' | 'prompt' | 'denied' | 'unsupported'
+> {
+  if (typeof window === 'undefined' || !('NDEFReader' in window)) {
+    return 'unsupported';
+  }
+  try {
+    if (!navigator.permissions?.query) return 'prompt';
+    const status = await navigator.permissions.query({
+      name: 'nfc' as PermissionName,
+    });
+    return status.state;
+  } catch {
+    return 'prompt';
+  }
 }
 
 export function inferIssuerFromCardNumberPrefix(digits: string): CardIssuer | null {
@@ -94,7 +111,7 @@ export function extractBalanceFromText(text: string): number | undefined {
       return Math.round(candidate);
     }
   } catch {
-    // not JSON, fallback to regex
+    // not JSON, continue
   }
   const match = text.match(/(?:rp|idr|saldo)\s*[:=]?\s*([\d.,]+)/i);
   if (!match) return undefined;
@@ -129,38 +146,44 @@ export async function startWebNfcScan(
   }
 
   const ndef = new window.NDEFReader();
+  let lastTriggerAt = 0;
 
   ndef.onreadingerror = (event) => {
+    const now = Date.now();
+    if (now - lastTriggerAt < 900) return;
+    lastTriggerAt = now;
+
     const rawSerial = (event.serialNumber || '').trim().toUpperCase();
-    const fallbackUid =
-      rawSerial || `CHIP-${Date.now().toString(16).slice(-8).toUpperCase()}`;
     onNonNdefDetected(
       {
-        uid: fallbackUid,
-        serialNumber: rawSerial || fallbackUid,
-        issuerGuess: guessIssuerFromUidOrText(fallbackUid),
+        uid: rawSerial,
+        serialNumber: rawSerial,
+        issuerGuess: rawSerial ? guessIssuerFromUidOrText(rawSerial) : 'bca',
         recordsCount: 0,
         nonNdefChip: true,
         timestamp: new Date().toISOString(),
         source: 'web_nfc',
       },
-      'Antena NFC mendeteksi chip non-NDEF (karakteristik kartu Mandiri e-Money / BCA Flazz / Brizzi / TapCash). Karena browser Web NFC hanya mendukung pembacaan UID & tag NDEF—bukan perintah APDU terenkripsi chip bank—pilih penerbit kartu & masukkan saldo saat ini untuk langsung menyimpan dan melacak mutasinya.',
+      rawSerial
+        ? `UID kartu bank (${rawSerial}) terbaca saat ditempel! Sistem langsung mencocokkan data kartu dan mutasi Anda.`
+        : 'Antena NFC mendeteksi kartu non-NDEF (seperti BCA Flazz / Mandiri e-Money) namun browser Android tidak mengirim nomor seri chip pada tag terenkripsi ini. Pilih kartu di panel kanan untuk langsung membaca & mencatat data di sistem.',
     );
   };
 
   ndef.onreading = (event: NDEFReadingEventLike) => {
+    const now = Date.now();
+    if (now - lastTriggerAt < 900) return;
+    lastTriggerAt = now;
+
     const texts: string[] = [];
     for (const record of event.message?.records || []) {
       const decoded = decodeNdefRecord(record);
       if (decoded) texts.push(decoded);
     }
     const rawText = texts.join(' ').trim();
-    const serial = (
-      event.serialNumber || `NFC-${Date.now().toString(16).slice(-8)}`
-    )
-      .trim()
-      .toUpperCase();
+    const serial = (event.serialNumber || '').trim().toUpperCase();
     const recordsCount = event.message?.records?.length || 0;
+
     onTagRead({
       uid: serial,
       serialNumber: serial,

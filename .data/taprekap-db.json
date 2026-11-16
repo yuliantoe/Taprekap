@@ -40,7 +40,7 @@
           "label": "Flazz Kunjungan Klien",
           "holderName": "Raka Pratama",
           "balance": 142000,
-          "lastTappedAt": "2026-11-15T17:15:00.000Z",
+          "lastTappedAt": "2026-11-16T10:15:29.243Z",
           "readSource": "web_nfc",
           "createdAt": "2026-10-26T09:15:00.000Z"
         }
@@ -201,8 +201,9 @@
           "updatedAt": "2026-11-14T16:15:00.000Z"
         }
       ],
-      "updatedAt": "2026-11-16T09:22:20.424Z",
-      "paymentHistory": []
+      "updatedAt": "2026-11-16T10:15:29.243Z",
+      "paymentHistory": [],
+      "ephemeralRuntime": false
     },
     "TEST-VERIFY": {
       "profile": {
@@ -264,7 +265,8 @@
       "transactions": [],
       "batches": [],
       "updatedAt": "2026-11-16T09:22:27.912Z",
-      "paymentHistory": []
+      "paymentHistory": [],
+      "ephemeralRuntime": false
     },
     "TEST-QRIS": {
       "profile": {
@@ -299,7 +301,8 @@
           "paidAt": "2026-11-16T09:28:04.930Z"
         }
       ],
-      "updatedAt": "2026-11-16T09:28:04.930Z"
+      "updatedAt": "2026-11-16T09:28:04.930Z",
+      "ephemeralRuntime": false
     }
   }
 }

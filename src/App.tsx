@@ -20,6 +20,7 @@ import type {
   BillingCycle,
   CardIssuer,
   EMoneyCard,
+  EMoneyTransaction,
   PlanTier,
   QrisPaymentOrder,
   ReimburseBatch,
@@ -49,6 +50,7 @@ import {
   localDeleteBatch,
   localDeleteCard,
   localDeleteTx,
+  localLookupCardByTap,
   localRecordTransaction,
   localSaveCard,
   localSaveProfile,
@@ -338,6 +340,42 @@ export default function App() {
     );
     applyWorkspace(res.workspace);
     return res.card;
+  }
+
+  async function handleLookupCardByTap(params: {
+    uid?: string;
+    cardNumber?: string;
+    issuer?: CardIssuer;
+  }): Promise<{
+    found: boolean;
+    card: EMoneyCard | null;
+    transactions: EMoneyTransaction[];
+    totalTransactionsCount: number;
+  }> {
+    const qs = new URLSearchParams();
+    qs.set('workspace', workspaceCode);
+    if (params.uid) qs.set('uid', params.uid);
+    if (params.cardNumber) qs.set('cardNumber', params.cardNumber);
+    if (params.issuer) qs.set('issuer', params.issuer);
+
+    const res = await withServerSync(
+      () =>
+        apiFetch<{
+          found: boolean;
+          card: EMoneyCard | null;
+          transactions: EMoneyTransaction[];
+          totalTransactionsCount: number;
+          workspace: WorkspaceData;
+        }>(`/api/cards/lookup?${qs.toString()}`),
+      (curr) => localLookupCardByTap(curr, params),
+    );
+    applyWorkspace(res.workspace);
+    return {
+      found: res.found,
+      card: res.card,
+      transactions: res.transactions,
+      totalTransactionsCount: res.totalTransactionsCount,
+    };
   }
 
   async function handleUpdateCard(id: string, payload: Partial<EMoneyCard>) {
@@ -744,8 +782,11 @@ export default function App() {
                 <NfcScannerPanel
                   isPremium={Boolean(isPremium)}
                   cards={workspace.cards}
+                  transactions={workspace.transactions}
                   activeCardId={activeCardId}
                   onSelectCard={setActiveCardId}
+                  onLookupCardByTap={handleLookupCardByTap}
+                  onLinkCardUid={(cardId, uid) => handleUpdateCard(cardId, { uid })}
                   onSaveCardFromScan={handleSaveCard}
                   onDeleteCard={handleDeleteCard}
                   onRecordTransaction={handleRecordTransaction}

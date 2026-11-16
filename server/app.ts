@@ -753,6 +753,62 @@ export function createApiApp() {
     res.status(201).json({ card, created: true, workspace: ws });
   });
 
+  app.get('/api/cards/lookup', async (req: Request, res: Response) => {
+    const code = getCodeFromReq(req);
+    const ws = await getWorkspace(code);
+    const rawUid = String(req.query.uid || '').trim().toUpperCase();
+    const rawCardNum = String(req.query.cardNumber || '').replace(/\D/g, '');
+    const rawIssuer = String(req.query.issuer || '').trim().toLowerCase();
+
+    let card = ws.cards.find((c) => {
+      if (rawUid && c.uid.toUpperCase() === rawUid) return true;
+      if (rawCardNum.length >= 8 && c.cardNumberFull === rawCardNum) return true;
+      return false;
+    });
+
+    if (!card && rawUid) {
+      const compactUid = rawUid.replace(/[^A-F0-9]/g, '');
+      if (compactUid.length >= 8) {
+        card = ws.cards.find(
+          (c) => c.uid.replace(/[^A-F0-9]/g, '').toUpperCase() === compactUid,
+        );
+      }
+    }
+
+    if (!card && !rawUid && rawIssuer) {
+      card = ws.cards.find((c) => c.issuer === rawIssuer);
+    }
+
+    if (!card) {
+      res.json({
+        found: false,
+        card: null,
+        transactions: [],
+        totalTransactionsCount: 0,
+        workspace: ws,
+      });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    card.lastTappedAt = now;
+    ws.updatedAt = now;
+    await persistDb();
+    broadcastWorkspace(code, ws);
+
+    const allCardTxs = ws.transactions.filter((t) => t.cardId === card.id);
+    const visibleTxs =
+      ws.subscription.tier === 'premium' ? allCardTxs : allCardTxs.slice(0, 5);
+
+    res.json({
+      found: true,
+      card,
+      transactions: visibleTxs,
+      totalTransactionsCount: allCardTxs.length,
+      workspace: ws,
+    });
+  });
+
   app.patch('/api/cards/:id', async (req: Request, res: Response) => {
     const code = getCodeFromReq(req);
     const ws = await getWorkspace(code);
@@ -763,6 +819,9 @@ export function createApiApp() {
     }
 
     const body = req.body as Partial<EMoneyCard>;
+    if (body.uid !== undefined && String(body.uid).trim()) {
+      card.uid = String(body.uid).trim().toUpperCase().slice(0, 48);
+    }
     if (body.label !== undefined) card.label = String(body.label).slice(0, 60);
     if (body.holderName !== undefined) card.holderName = String(body.holderName).slice(0, 60);
     if (body.issuer !== undefined) card.issuer = body.issuer;
