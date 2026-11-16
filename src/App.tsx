@@ -41,8 +41,41 @@ import { UpgradeModal } from './components/UpgradeModal';
 import { CardQrModal } from './components/CardQrModal';
 import { QrisCheckoutModal } from './components/QrisCheckoutModal';
 import { LandingPage } from './components/LandingPage';
+import {
+  createClientSeedWorkspace,
+  localCancelQris,
+  localConfirmQris,
+  localCreateBatch,
+  localDeleteBatch,
+  localDeleteCard,
+  localDeleteTx,
+  localRecordTransaction,
+  localSaveCard,
+  localSaveProfile,
+  localSelectPlan,
+  localStartQris,
+  localUpdateBatchStatus,
+  localUpdateCard,
+  readWorkspaceMirror,
+  writeWorkspaceMirror,
+} from './lib/workspaceClientFallback';
 
 type ActiveTab = 'landing' | 'scan' | 'history' | 'reimburse' | 'wallet' | 'pricing';
+
+class ApiHttpError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+function isApiUnavailableError(err: unknown): boolean {
+  if (err instanceof ApiHttpError) {
+    return err.status === 404 || err.status >= 500;
+  }
+  return err instanceof TypeError;
+}
 
 function getInitialTab(): ActiveTab {
   const params = new URLSearchParams(window.location.search);
@@ -74,9 +107,12 @@ function getInitialWorkspaceCode(): string {
 
 export default function App() {
   const [workspaceCode, setWorkspaceCode] = useState<string>(getInitialWorkspaceCode);
-  const [workspace, setWorkspace] = useState<WorkspaceData | null>(null);
+  const [workspace, setWorkspace] = useState<WorkspaceData | null>(() =>
+    readWorkspaceMirror(getInitialWorkspaceCode()),
+  );
   const [loading, setLoading] = useState(true);
   const [apiError, setApiError] = useState<string | null>(null);
+  const [localFallbackActive, setLocalFallbackActive] = useState(false);
   const [activeTab, setActiveTab] = useState<ActiveTab>(getInitialTab);
   const [activeCardId, setActiveCardId] = useState<string | null>(null);
   const [selectedTxIds, setSelectedTxIds] = useState<string[]>([]);
@@ -86,6 +122,17 @@ export default function App() {
   const [activeQrisOrder, setActiveQrisOrder] = useState<QrisPaymentOrder | null>(null);
 
   const isPremium = workspace?.subscription?.tier === 'premium';
+
+  const applyWorkspace = useCallback(
+    (data: WorkspaceData) => {
+      setWorkspace(data);
+      writeWorkspaceMirror(workspaceCode, data);
+      setActiveCardId((prev) =>
+        prev && data.cards.some((c) => c.id === prev) ? prev : data.cards[0]?.id || null,
+      );
+    },
+    [workspaceCode],
+  );
 
   const apiFetch = useCallback(
     async <T,>(url: string, options?: RequestInit): Promise<T> => {
@@ -99,7 +146,10 @@ export default function App() {
       });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(body.error || `Permintaan gagal (${res.status})`);
+        throw new ApiHttpError(
+          res.status,
+          body.error || `Permintaan gagal (${res.status})`,
+        );
       }
       return res.json() as Promise<T>;
     },
@@ -108,45 +158,66 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
+    let es: EventSource | null = null;
     setLoading(true);
     setApiError(null);
+    setLocalFallbackActive(false);
 
     apiFetch<WorkspaceData>(`/api/workspace?workspace=${encodeURIComponent(workspaceCode)}`)
-      .then((data) => {
+      .then(async (data) => {
         if (!active) return;
-        setWorkspace(data);
-        setActiveCardId((prev) => prev || data.cards[0]?.id || null);
+
+        let resolved = data;
+        if (data.ephemeralRuntime) {
+          const mirror = readWorkspaceMirror(workspaceCode);
+          if (mirror && new Date(mirror.updatedAt).getTime() > new Date(data.updatedAt).getTime()) {
+            try {
+              resolved = await apiFetch<WorkspaceData>('/api/workspace/hydrate', {
+                method: 'POST',
+                body: JSON.stringify({ workspace: mirror }),
+              });
+            } catch {
+              resolved = mirror;
+            }
+          }
+        }
+
+        if (!active) return;
+        applyWorkspace(resolved);
         setLoading(false);
+
+        if (!resolved.ephemeralRuntime) {
+          es = new EventSource(`/api/stream?workspace=${encodeURIComponent(workspaceCode)}`);
+          es.addEventListener('sync', (evt) => {
+            try {
+              const synced = JSON.parse((evt as MessageEvent).data) as WorkspaceData;
+              if (!active) return;
+              applyWorkspace(synced);
+            } catch {
+              // ignore parse failure
+            }
+          });
+        }
       })
       .catch((err) => {
         if (!active) return;
+        if (isApiUnavailableError(err)) {
+          const fallback = createClientSeedWorkspace(workspaceCode);
+          setLocalFallbackActive(true);
+          applyWorkspace(fallback);
+          setApiError(null);
+          setLoading(false);
+          return;
+        }
         setApiError(err instanceof Error ? err.message : 'Gagal memuat data cloud.');
         setLoading(false);
       });
 
-    const es = new EventSource(
-      `/api/stream?workspace=${encodeURIComponent(workspaceCode)}`,
-    );
-    es.addEventListener('sync', (evt) => {
-      try {
-        const synced = JSON.parse((evt as MessageEvent).data) as WorkspaceData;
-        if (!active) return;
-        setWorkspace(synced);
-        setActiveCardId((prev) =>
-          prev && synced.cards.some((c) => c.id === prev)
-            ? prev
-            : synced.cards[0]?.id || null,
-        );
-      } catch {
-        // ignore parse failure
-      }
-    });
-
     return () => {
       active = false;
-      es.close();
+      es?.close();
     };
-  }, [workspaceCode, apiFetch]);
+  }, [workspaceCode, apiFetch, applyWorkspace]);
 
   function handleSwitchWorkspace(nextCode: string) {
     localStorage.setItem('taprekap_ws', nextCode);
@@ -158,50 +229,95 @@ export default function App() {
     setWorkspaceCode(nextCode);
   }
 
+  async function withServerSync<T>(
+    serverCall: () => Promise<T>,
+    localFallback: (current: WorkspaceData) => T,
+  ): Promise<T> {
+    if (!localFallbackActive) {
+      try {
+        return await serverCall();
+      } catch (err) {
+        if (!isApiUnavailableError(err) || !workspace) {
+          throw err;
+        }
+        if (workspace.ephemeralRuntime) {
+          try {
+            await apiFetch<WorkspaceData>('/api/workspace/hydrate', {
+              method: 'POST',
+              body: JSON.stringify({ workspace }),
+            });
+            return await serverCall();
+          } catch {
+            // Fall through to local mirror update
+          }
+        }
+        setLocalFallbackActive(true);
+      }
+    }
+    const base = workspace || createClientSeedWorkspace(workspaceCode);
+    return localFallback(base);
+  }
+
   async function handleSelectPlan(tier: PlanTier, billingCycle?: BillingCycle) {
-    const updated = await apiFetch<WorkspaceData>('/api/workspace/subscription', {
-      method: 'PUT',
-      body: JSON.stringify({ tier, billingCycle }),
-    });
-    setWorkspace(updated);
+    const updated = await withServerSync(
+      () =>
+        apiFetch<WorkspaceData>('/api/workspace/subscription', {
+          method: 'PUT',
+          body: JSON.stringify({ tier, billingCycle }),
+        }),
+      (curr) => localSelectPlan(curr, tier, billingCycle),
+    );
+    applyWorkspace(updated);
   }
 
   async function handleStartQrisPayment(billingCycle: BillingCycle) {
-    const res = await apiFetch<{ order: QrisPaymentOrder; workspace: WorkspaceData }>(
-      '/api/payments/qris',
-      {
-        method: 'POST',
-        body: JSON.stringify({ billingCycle }),
-      },
+    const res = await withServerSync(
+      () =>
+        apiFetch<{ order: QrisPaymentOrder; workspace: WorkspaceData }>('/api/payments/qris', {
+          method: 'POST',
+          body: JSON.stringify({ billingCycle }),
+        }),
+      (curr) => localStartQris(curr, billingCycle),
     );
-    setWorkspace(res.workspace);
+    applyWorkspace(res.workspace);
     setActiveQrisOrder(res.order);
   }
 
   async function handleConfirmQrisPayment(orderId: string) {
-    const res = await apiFetch<{ order: QrisPaymentOrder; workspace: WorkspaceData }>(
-      `/api/payments/qris/${orderId}/confirm`,
-      { method: 'POST' },
+    const res = await withServerSync(
+      () =>
+        apiFetch<{ order: QrisPaymentOrder; workspace: WorkspaceData }>(
+          `/api/payments/qris/${orderId}/confirm`,
+          { method: 'POST' },
+        ),
+      (curr) => localConfirmQris(curr, orderId),
     );
-    setWorkspace(res.workspace);
+    applyWorkspace(res.workspace);
     setActiveQrisOrder(res.order);
   }
 
   async function handleCancelQrisOrder(orderId: string) {
-    const res = await apiFetch<{ workspace: WorkspaceData }>(
-      `/api/payments/qris/${orderId}`,
-      { method: 'DELETE' },
+    const res = await withServerSync(
+      () =>
+        apiFetch<{ workspace: WorkspaceData }>(`/api/payments/qris/${orderId}`, {
+          method: 'DELETE',
+        }),
+      (curr) => ({ workspace: localCancelQris(curr, orderId) }),
     );
-    setWorkspace(res.workspace);
+    applyWorkspace(res.workspace);
     setActiveQrisOrder(null);
   }
 
   async function handleSaveProfile(profile: Partial<WorkspaceProfile>) {
-    const updated = await apiFetch<WorkspaceData>('/api/workspace/profile', {
-      method: 'PUT',
-      body: JSON.stringify(profile),
-    });
-    setWorkspace(updated);
+    const updated = await withServerSync(
+      () =>
+        apiFetch<WorkspaceData>('/api/workspace/profile', {
+          method: 'PUT',
+          body: JSON.stringify(profile),
+        }),
+      (curr) => localSaveProfile(curr, profile),
+    );
+    applyWorkspace(updated);
   }
 
   async function handleSaveCard(payload: {
@@ -212,27 +328,39 @@ export default function App() {
     balance: number;
     readSource: 'web_nfc' | 'manual_sync' | 'simulasi' | 'card_number';
   }): Promise<EMoneyCard> {
-    const res = await apiFetch<{ card: EMoneyCard; workspace: WorkspaceData }>('/api/cards', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
-    setWorkspace(res.workspace);
+    const res = await withServerSync(
+      () =>
+        apiFetch<{ card: EMoneyCard; workspace: WorkspaceData }>('/api/cards', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        }),
+      (curr) => localSaveCard(curr, payload),
+    );
+    applyWorkspace(res.workspace);
     return res.card;
   }
 
   async function handleUpdateCard(id: string, payload: Partial<EMoneyCard>) {
-    const res = await apiFetch<{ workspace: WorkspaceData }>(`/api/cards/${id}`, {
-      method: 'PATCH',
-      body: JSON.stringify(payload),
-    });
-    setWorkspace(res.workspace);
+    const res = await withServerSync(
+      () =>
+        apiFetch<{ workspace: WorkspaceData }>(`/api/cards/${id}`, {
+          method: 'PATCH',
+          body: JSON.stringify(payload),
+        }),
+      (curr) => ({ workspace: localUpdateCard(curr, id, payload) }),
+    );
+    applyWorkspace(res.workspace);
   }
 
   async function handleDeleteCard(id: string) {
-    const res = await apiFetch<{ workspace: WorkspaceData }>(`/api/cards/${id}`, {
-      method: 'DELETE',
-    });
-    setWorkspace(res.workspace);
+    const res = await withServerSync(
+      () =>
+        apiFetch<{ workspace: WorkspaceData }>(`/api/cards/${id}`, {
+          method: 'DELETE',
+        }),
+      (curr) => ({ workspace: localDeleteCard(curr, id) }),
+    );
+    applyWorkspace(res.workspace);
   }
 
   async function handleRecordTransaction(payload: {
@@ -248,19 +376,27 @@ export default function App() {
     activityCaption?: string;
     overrideBalanceAfter?: number;
   }) {
-    const res = await apiFetch<{ workspace: WorkspaceData }>('/api/transactions', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
-    setWorkspace(res.workspace);
+    const res = await withServerSync(
+      () =>
+        apiFetch<{ workspace: WorkspaceData }>('/api/transactions', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        }),
+      (curr) => ({ workspace: localRecordTransaction(curr, payload) }),
+    );
+    applyWorkspace(res.workspace);
   }
 
   async function handleDeleteTx(txId: string) {
-    const res = await apiFetch<{ workspace: WorkspaceData }>(`/api/transactions/${txId}`, {
-      method: 'DELETE',
-    });
+    const res = await withServerSync(
+      () =>
+        apiFetch<{ workspace: WorkspaceData }>(`/api/transactions/${txId}`, {
+          method: 'DELETE',
+        }),
+      (curr) => ({ workspace: localDeleteTx(curr, txId) }),
+    );
     setSelectedTxIds((prev) => prev.filter((id) => id !== txId));
-    setWorkspace(res.workspace);
+    applyWorkspace(res.workspace);
   }
 
   async function handleCreateBatch(payload: {
@@ -274,14 +410,15 @@ export default function App() {
     transactionIds: string[];
     status: 'draft' | 'submitted';
   }): Promise<ReimburseBatch> {
-    const res = await apiFetch<{ batch: ReimburseBatch; workspace: WorkspaceData }>(
-      '/api/batches',
-      {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      },
+    const res = await withServerSync(
+      () =>
+        apiFetch<{ batch: ReimburseBatch; workspace: WorkspaceData }>('/api/batches', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        }),
+      (curr) => localCreateBatch(curr, payload),
     );
-    setWorkspace(res.workspace);
+    applyWorkspace(res.workspace);
     return res.batch;
   }
 
@@ -289,18 +426,26 @@ export default function App() {
     batchId: string,
     status: 'draft' | 'submitted' | 'approved',
   ) {
-    const res = await apiFetch<{ workspace: WorkspaceData }>(`/api/batches/${batchId}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ status }),
-    });
-    setWorkspace(res.workspace);
+    const res = await withServerSync(
+      () =>
+        apiFetch<{ workspace: WorkspaceData }>(`/api/batches/${batchId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ status }),
+        }),
+      (curr) => ({ workspace: localUpdateBatchStatus(curr, batchId, status) }),
+    );
+    applyWorkspace(res.workspace);
   }
 
   async function handleDeleteBatch(batchId: string) {
-    const res = await apiFetch<{ workspace: WorkspaceData }>(`/api/batches/${batchId}`, {
-      method: 'DELETE',
-    });
-    setWorkspace(res.workspace);
+    const res = await withServerSync(
+      () =>
+        apiFetch<{ workspace: WorkspaceData }>(`/api/batches/${batchId}`, {
+          method: 'DELETE',
+        }),
+      (curr) => ({ workspace: localDeleteBatch(curr, batchId) }),
+    );
+    applyWorkspace(res.workspace);
   }
 
   async function handleHeaderPrimaryAction() {
@@ -475,7 +620,7 @@ export default function App() {
                 {apiError}
               </div>
             )}
-            {loading || !workspace ? (
+            {!workspace ? (
               <div className="bg-white border border-neutral-200 rounded-2xl p-10 text-center text-sm text-neutral-500">
                 Menyiapkan TapRekap...
               </div>

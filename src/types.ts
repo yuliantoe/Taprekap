@@ -110,6 +110,7 @@ export interface WorkspaceData {
   batches: ReimburseBatch[];
   paymentHistory: QrisPaymentOrder[];
   updatedAt: string;
+  ephemeralRuntime?: boolean;
 }
 
 export interface NfcScanResult {
