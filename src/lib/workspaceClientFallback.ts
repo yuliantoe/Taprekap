@@ -54,7 +54,7 @@ function maskCardNumber(full: string): string {
 
 function inferIssuerFromCardNumber(digits: string): CardIssuer {
   if (digits.startsWith('6032')) return 'mandiri';
-  if (digits.startsWith('0148') || digits.startsWith('5200')) return 'bca';
+  if (digits.startsWith('0148') || digits.startsWith('5200') || digits.startsWith('0140')) return 'bca';
   if (digits.startsWith('6013')) return 'bri';
   if (digits.startsWith('7546')) return 'bni';
   if (digits.startsWith('8801')) return 'kmt';
@@ -500,18 +500,20 @@ export function localSaveCard(
 
 export function localLookupCardByTap(
   ws: WorkspaceData,
-  params: { uid?: string; cardNumber?: string; issuer?: string },
+  params: { uid?: string; cardNumber?: string; issuer?: string; autoLinkIfSingle?: boolean },
 ): {
   found: boolean;
   card: EMoneyCard | null;
   transactions: EMoneyTransaction[];
   totalTransactionsCount: number;
+  autoLinkedUid?: boolean;
   workspace: WorkspaceData;
 } {
   const next: WorkspaceData = structuredClone(ws);
   const rawUid = String(params.uid || '').trim().toUpperCase();
   const rawCardNum = String(params.cardNumber || '').replace(/\D/g, '');
   const rawIssuer = String(params.issuer || '').trim().toLowerCase();
+  let autoLinkedUid = false;
 
   let card = next.cards.find((c) => {
     if (rawUid && c.uid.toUpperCase() === rawUid) return true;
@@ -532,12 +534,26 @@ export function localLookupCardByTap(
     card = next.cards.find((c) => c.issuer === rawIssuer);
   }
 
+  if (!card && params.autoLinkIfSingle && rawIssuer) {
+    const sameIssuer = next.cards.filter((c) => c.issuer === rawIssuer);
+    if (sameIssuer.length === 1) {
+      card = sameIssuer[0];
+      if (rawUid && !next.cards.some((other) => other.id !== card!.id && other.uid.toUpperCase() === rawUid)) {
+        card.uid = rawUid.slice(0, 48);
+        autoLinkedUid = true;
+      }
+    } else if (!rawUid && sameIssuer.length > 0) {
+      card = sameIssuer[0];
+    }
+  }
+
   if (!card) {
     return {
       found: false,
       card: null,
       transactions: [],
       totalTransactionsCount: 0,
+      autoLinkedUid: false,
       workspace: next,
     };
   }
@@ -556,6 +572,7 @@ export function localLookupCardByTap(
     card,
     transactions: visibleTxs,
     totalTransactionsCount: allCardTxs.length,
+    autoLinkedUid,
     workspace: next,
   };
 }
@@ -638,6 +655,73 @@ export function localRecordTransaction(
   next.updatedAt = now;
   writeWorkspaceMirror(next.profile.workspaceCode, next);
   return next;
+}
+
+export function localBatchImportTransactions(
+  ws: WorkspaceData,
+  payload: {
+    cardId: string;
+    updatedBalance?: number | null;
+    items: Array<{
+      type: TransactionType;
+      category: TransactionCategory;
+      merchant: string;
+      location: string;
+      amount: number;
+      notes?: string;
+    }>;
+  },
+): { importedCount: number; workspace: WorkspaceData } {
+  const next: WorkspaceData = structuredClone(ws);
+  const card = next.cards.find((c) => c.id === payload.cardId);
+  if (!card) throw new Error('Kartu tidak ditemukan');
+  const validItems = payload.items
+    .map((it) => ({
+      ...it,
+      amount: Math.max(0, Math.round(Number(it.amount) || 0)),
+    }))
+    .filter((it) => it.amount > 0);
+
+  let runningBalance =
+    typeof payload.updatedBalance === 'number' && !Number.isNaN(payload.updatedBalance)
+      ? Math.max(0, Math.round(payload.updatedBalance))
+      : card.balance;
+
+  if (typeof payload.updatedBalance !== 'number' || Number.isNaN(payload.updatedBalance)) {
+    let computed = card.balance;
+    for (let i = validItems.length - 1; i >= 0; i -= 1) {
+      const it = validItems[i];
+      computed = it.type === 'topup' ? computed + it.amount : Math.max(0, computed - it.amount);
+    }
+    runningBalance = computed;
+  }
+
+  const nowMs = Date.now();
+  const created: EMoneyTransaction[] = validItems.map((it, idx) => ({
+    id: createId('tx'),
+    cardId: card.id,
+    cardUid: card.uid,
+    issuer: card.issuer,
+    cardLabel: card.label,
+    type: it.type,
+    category: it.category,
+    merchant: it.merchant,
+    location: it.location || 'Indonesia',
+    amount: it.amount,
+    balanceAfter: runningBalance,
+    timestamp: new Date(nowMs - idx * 60000).toISOString(),
+    reimburseStatus: 'unclaimed',
+    notes: it.notes || 'Diekstrak AI Key Flazz BCA',
+  }));
+
+  if (created.length > 0) {
+    next.transactions.unshift(...created);
+  }
+  card.balance = runningBalance;
+  card.lastTappedAt = new Date().toISOString();
+  next.updatedAt = card.lastTappedAt;
+  writeWorkspaceMirror(next.profile.workspaceCode, next);
+  return { importedCount: created.length, workspace: next };
 }
 
 export function localDeleteTx(ws: WorkspaceData, txId: string): WorkspaceData {

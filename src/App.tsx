@@ -21,6 +21,9 @@ import type {
   CardIssuer,
   EMoneyCard,
   EMoneyTransaction,
+  FlazzAiInsight,
+  FlazzAiParseResponse,
+  FlazzAiStatusResponse,
   PlanTier,
   QrisPaymentOrder,
   ReimburseBatch,
@@ -44,6 +47,7 @@ import { QrisCheckoutModal } from './components/QrisCheckoutModal';
 import { LandingPage } from './components/LandingPage';
 import {
   createClientSeedWorkspace,
+  localBatchImportTransactions,
   localCancelQris,
   localConfirmQris,
   localCreateBatch,
@@ -122,6 +126,7 @@ export default function App() {
   const [upgradeReason, setUpgradeReason] = useState<string | null>(null);
   const [qrCard, setQrCard] = useState<EMoneyCard | null>(null);
   const [activeQrisOrder, setActiveQrisOrder] = useState<QrisPaymentOrder | null>(null);
+  const [flazzAiStatus, setFlazzAiStatus] = useState<FlazzAiStatusResponse | null>(null);
 
   const isPremium = workspace?.subscription?.tier === 'premium';
 
@@ -220,6 +225,21 @@ export default function App() {
       es?.close();
     };
   }, [workspaceCode, apiFetch, applyWorkspace]);
+
+  useEffect(() => {
+    let active = true;
+    fetch('/api/ai/status')
+      .then((res) => (res.ok ? (res.json() as Promise<FlazzAiStatusResponse>) : null))
+      .then((status) => {
+        if (active && status) {
+          setFlazzAiStatus(status);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
 
   function handleSwitchWorkspace(nextCode: string) {
     localStorage.setItem('taprekap_ws', nextCode);
@@ -346,17 +366,20 @@ export default function App() {
     uid?: string;
     cardNumber?: string;
     issuer?: CardIssuer;
+    autoLinkIfSingle?: boolean;
   }): Promise<{
     found: boolean;
     card: EMoneyCard | null;
     transactions: EMoneyTransaction[];
     totalTransactionsCount: number;
+    autoLinkedUid?: boolean;
   }> {
     const qs = new URLSearchParams();
     qs.set('workspace', workspaceCode);
     if (params.uid) qs.set('uid', params.uid);
     if (params.cardNumber) qs.set('cardNumber', params.cardNumber);
     if (params.issuer) qs.set('issuer', params.issuer);
+    if (params.autoLinkIfSingle) qs.set('autoLinkIfSingle', '1');
 
     const res = await withServerSync(
       () =>
@@ -365,6 +388,7 @@ export default function App() {
           card: EMoneyCard | null;
           transactions: EMoneyTransaction[];
           totalTransactionsCount: number;
+          autoLinkedUid?: boolean;
           workspace: WorkspaceData;
         }>(`/api/cards/lookup?${qs.toString()}`),
       (curr) => localLookupCardByTap(curr, params),
@@ -375,7 +399,68 @@ export default function App() {
       card: res.card,
       transactions: res.transactions,
       totalTransactionsCount: res.totalTransactionsCount,
+      autoLinkedUid: res.autoLinkedUid,
     };
+  }
+
+  async function handleAnalyzeFlazzTap(
+    cardId: string,
+    scanUid?: string,
+    scanSource?: string,
+  ): Promise<FlazzAiInsight> {
+    const res = await apiFetch<{ insight: FlazzAiInsight }>('/api/ai/flazz-instant-read', {
+      method: 'POST',
+      body: JSON.stringify({
+        mode: 'tap_summary',
+        cardId,
+        scanUid,
+        scanSource,
+      }),
+    });
+    return res.insight;
+  }
+
+  async function handleParseFlazzSource(params: {
+    cardId?: string;
+    imageBase64?: string;
+    mimeType?: string;
+    rawTextOrHex?: string;
+  }): Promise<FlazzAiParseResponse> {
+    const res = await apiFetch<{ parsed: FlazzAiParseResponse }>('/api/ai/flazz-instant-read', {
+      method: 'POST',
+      body: JSON.stringify({
+        mode: 'parse_source',
+        ...params,
+      }),
+    });
+    return res.parsed;
+  }
+
+  async function handleBatchImportTransactions(payload: {
+    cardId: string;
+    updatedBalance?: number | null;
+    items: Array<{
+      type: TransactionType;
+      category: TransactionCategory;
+      merchant: string;
+      location: string;
+      amount: number;
+      notes?: string;
+    }>;
+  }): Promise<number> {
+    const res = await withServerSync(
+      () =>
+        apiFetch<{ importedCount: number; workspace: WorkspaceData }>(
+          '/api/transactions/batch-import',
+          {
+            method: 'POST',
+            body: JSON.stringify(payload),
+          },
+        ),
+      (curr) => localBatchImportTransactions(curr, payload),
+    );
+    applyWorkspace(res.workspace);
+    return res.importedCount;
   }
 
   async function handleUpdateCard(id: string, payload: Partial<EMoneyCard>) {
@@ -784,9 +869,14 @@ export default function App() {
                   cards={workspace.cards}
                   transactions={workspace.transactions}
                   activeCardId={activeCardId}
+                  flazzAiStatus={flazzAiStatus}
                   onSelectCard={setActiveCardId}
                   onLookupCardByTap={handleLookupCardByTap}
+                  onAnalyzeFlazzTap={handleAnalyzeFlazzTap}
+                  onParseFlazzSource={handleParseFlazzSource}
+                  onBatchImportTransactions={handleBatchImportTransactions}
                   onLinkCardUid={(cardId, uid) => handleUpdateCard(cardId, { uid })}
+                  onUpdateCardBalance={(cardId, balance) => handleUpdateCard(cardId, { balance })}
                   onSaveCardFromScan={handleSaveCard}
                   onDeleteCard={handleDeleteCard}
                   onRecordTransaction={handleRecordTransaction}

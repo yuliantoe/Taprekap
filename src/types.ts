@@ -124,3 +124,44 @@ export interface NfcScanResult {
   timestamp: string;
   source: 'web_nfc' | 'simulasi';
 }
+
+export interface FlazzAiInsight {
+  ringkasanInstan: string;
+  sorotanPemakaian: string[];
+  rekomendasiReimburse: string;
+  protocolVerdict: string;
+  totalDebit: number;
+  totalTopup: number;
+  analyzedAt: string;
+  model: string;
+}
+
+export interface FlazzParsedTransactionDraft {
+  type: TransactionType;
+  category: TransactionCategory;
+  merchant: string;
+  location: string;
+  amount: number;
+  notes?: string;
+  timestampHint?: string;
+}
+
+export interface FlazzAiParseResponse {
+  detectedBalance: number | null;
+  cardNumberHint: string | null;
+  summary: string;
+  transactions: FlazzParsedTransactionDraft[];
+  analyzedAt: string;
+  model: string;
+}
+
+export interface FlazzAiStatusResponse {
+  configured: boolean;
+  model: string;
+  flazzProtocol: {
+    aidGen1: string;
+    aidGen2: string;
+    standard: string;
+  };
+}
+

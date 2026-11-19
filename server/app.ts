@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from 'express';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -18,6 +19,12 @@ import type {
   WorkspaceProfile,
 } from '../src/types.ts';
 import { buildDynamicQrisPayload, PREMIUM_PRICING } from '../src/lib/qris.ts';
+import {
+  analyzeFlazzTapHistory,
+  FlazzAiHttpError,
+  getFlazzAiStatus,
+  parseFlazzHistorySource,
+} from './flazzAi.ts';
 
 export const IS_VERCEL = Boolean(process.env.VERCEL);
 
@@ -62,7 +69,7 @@ function maskCardNumber(full: string): string {
 
 function inferIssuerFromCardNumber(digits: string): CardIssuer {
   if (digits.startsWith('6032')) return 'mandiri';
-  if (digits.startsWith('0148') || digits.startsWith('5200')) return 'bca';
+  if (digits.startsWith('0148') || digits.startsWith('5200') || digits.startsWith('0140')) return 'bca';
   if (digits.startsWith('6013')) return 'bri';
   if (digits.startsWith('7546')) return 'bni';
   if (digits.startsWith('8801')) return 'kmt';
@@ -753,13 +760,78 @@ export function createApiApp() {
     res.status(201).json({ card, created: true, workspace: ws });
   });
 
+  app.get('/api/ai/status', (_req: Request, res: Response) => {
+    res.json(getFlazzAiStatus());
+  });
+
+  app.post('/api/ai/flazz-instant-read', async (req: Request, res: Response) => {
+    const code = getCodeFromReq(req);
+    const ws = await getWorkspace(code);
+    const body = req.body as {
+      mode?: 'tap_summary' | 'parse_source';
+      cardId?: string;
+      scanUid?: string;
+      scanSource?: string;
+      imageBase64?: string;
+      mimeType?: string;
+      rawTextOrHex?: string;
+    };
+
+    try {
+      const targetCard =
+        (body.cardId ? ws.cards.find((c) => c.id === body.cardId) : undefined) ||
+        ws.cards.find((c) => c.issuer === 'bca') ||
+        ws.cards[0] ||
+        null;
+
+      if (body.mode === 'parse_source') {
+        const parsed = await parseFlazzHistorySource({
+          imageBase64: body.imageBase64,
+          mimeType: body.mimeType,
+          rawTextOrHex: body.rawTextOrHex,
+          card: targetCard,
+        });
+        res.json({ parsed });
+        return;
+      }
+
+      if (!targetCard) {
+        res.status(404).json({ error: 'Kartu Flazz tidak ditemukan di workspace.' });
+        return;
+      }
+
+      const allCardTxs = ws.transactions.filter((t) => t.cardId === targetCard.id);
+      const visibleTxs =
+        ws.subscription.tier === 'premium' ? allCardTxs : allCardTxs.slice(0, 5);
+
+      const insight = await analyzeFlazzTapHistory({
+        card: targetCard,
+        transactions: visibleTxs,
+        scanUid: body.scanUid,
+        scanSource: body.scanSource,
+      });
+
+      res.json({ insight });
+    } catch (err) {
+      if (err instanceof FlazzAiHttpError) {
+        res.status(err.status).json({ error: err.message });
+        return;
+      }
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Gagal menjalankan analisis AI Flazz BCA',
+      });
+    }
+  });
+
   app.get('/api/cards/lookup', async (req: Request, res: Response) => {
     const code = getCodeFromReq(req);
     const ws = await getWorkspace(code);
     const rawUid = String(req.query.uid || '').trim().toUpperCase();
     const rawCardNum = String(req.query.cardNumber || '').replace(/\D/g, '');
     const rawIssuer = String(req.query.issuer || '').trim().toLowerCase();
+    const autoLinkIfSingle = String(req.query.autoLinkIfSingle || '') === '1';
 
+    let autoLinkedUid = false;
     let card = ws.cards.find((c) => {
       if (rawUid && c.uid.toUpperCase() === rawUid) return true;
       if (rawCardNum.length >= 8 && c.cardNumberFull === rawCardNum) return true;
@@ -779,12 +851,26 @@ export function createApiApp() {
       card = ws.cards.find((c) => c.issuer === rawIssuer);
     }
 
+    if (!card && autoLinkIfSingle && rawIssuer) {
+      const sameIssuerCards = ws.cards.filter((c) => c.issuer === rawIssuer);
+      if (sameIssuerCards.length === 1) {
+        card = sameIssuerCards[0];
+        if (rawUid && !ws.cards.some((other) => other.id !== card!.id && other.uid.toUpperCase() === rawUid)) {
+          card.uid = rawUid.slice(0, 48);
+          autoLinkedUid = true;
+        }
+      } else if (!rawUid && sameIssuerCards.length > 0) {
+        card = sameIssuerCards[0];
+      }
+    }
+
     if (!card) {
       res.json({
         found: false,
         card: null,
         transactions: [],
         totalTransactionsCount: 0,
+        autoLinkedUid: false,
         workspace: ws,
       });
       return;
@@ -805,6 +891,7 @@ export function createApiApp() {
       card,
       transactions: visibleTxs,
       totalTransactionsCount: allCardTxs.length,
+      autoLinkedUid,
       workspace: ws,
     });
   });
@@ -920,6 +1007,98 @@ export function createApiApp() {
     await persistDb();
     broadcastWorkspace(code, ws);
     res.status(201).json({ transaction: tx, workspace: ws });
+  });
+
+  app.post('/api/transactions/batch-import', async (req: Request, res: Response) => {
+    const code = getCodeFromReq(req);
+    const ws = await getWorkspace(code);
+    const body = req.body as {
+      cardId: string;
+      updatedBalance?: number | null;
+      items?: Array<{
+        type: TransactionType;
+        category: TransactionCategory;
+        merchant: string;
+        location?: string;
+        amount: number;
+        notes?: string;
+      }>;
+    };
+
+    const card = ws.cards.find((c) => c.id === body.cardId);
+    if (!card) {
+      res.status(404).json({ error: 'Kartu tidak ditemukan' });
+      return;
+    }
+
+    const items = Array.isArray(body.items) ? body.items : [];
+    const nowMs = Date.now();
+    let runningBalance =
+      typeof body.updatedBalance === 'number' && !Number.isNaN(body.updatedBalance)
+        ? Math.max(0, Math.round(body.updatedBalance))
+        : card.balance;
+
+    const validItems = items
+      .map((item) => ({
+        type: (item.type === 'topup' ? 'topup' : 'debit') as TransactionType,
+        category: item.category || (item.type === 'topup' ? 'topup' : 'tol'),
+        merchant: String(item.merchant || 'Transaksi Flazz BCA').slice(0, 90),
+        location: String(item.location || 'Indonesia').slice(0, 60),
+        amount: Math.max(0, Math.round(Number(item.amount) || 0)),
+        notes: item.notes ? String(item.notes).slice(0, 180) : undefined,
+      }))
+      .filter((it) => it.amount > 0);
+
+    if (
+      validItems.length === 0 &&
+      (typeof body.updatedBalance !== 'number' || Number.isNaN(body.updatedBalance))
+    ) {
+      res.status(400).json({ error: 'Tidak ada mutasi atau saldo baru untuk disimpan.' });
+      return;
+    }
+
+    // If updatedBalance isn't explicitly supplied, compute from transactions
+    if (typeof body.updatedBalance !== 'number' || Number.isNaN(body.updatedBalance)) {
+      let computed = card.balance;
+      for (let i = validItems.length - 1; i >= 0; i -= 1) {
+        const it = validItems[i];
+        computed = it.type === 'topup' ? computed + it.amount : Math.max(0, computed - it.amount);
+      }
+      runningBalance = computed;
+    }
+
+    const created: EMoneyTransaction[] = [];
+    for (let i = 0; i < validItems.length; i += 1) {
+      const it = validItems[i];
+      const ts = new Date(nowMs - i * 60000).toISOString();
+      const tx: EMoneyTransaction = {
+        id: createId('tx'),
+        cardId: card.id,
+        cardUid: card.uid,
+        issuer: card.issuer,
+        cardLabel: card.label,
+        type: it.type,
+        category: it.category,
+        merchant: it.merchant,
+        location: it.location,
+        amount: it.amount,
+        balanceAfter: runningBalance,
+        timestamp: ts,
+        reimburseStatus: 'unclaimed',
+        notes: it.notes || 'Diekstrak AI Key Flazz BCA',
+      };
+      created.push(tx);
+    }
+
+    if (created.length > 0) {
+      ws.transactions.unshift(...created);
+    }
+    card.balance = runningBalance;
+    card.lastTappedAt = new Date().toISOString();
+    ws.updatedAt = card.lastTappedAt;
+    await persistDb();
+    broadcastWorkspace(code, ws);
+    res.status(201).json({ importedCount: created.length, workspace: ws });
   });
 
   app.patch('/api/transactions/:id', async (req: Request, res: Response) => {

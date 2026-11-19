@@ -76,7 +76,7 @@ export async function queryNfcPermissionState(): Promise<
 export function inferIssuerFromCardNumberPrefix(digits: string): CardIssuer | null {
   const clean = digits.replace(/\D/g, '');
   if (clean.startsWith('6032')) return 'mandiri';
-  if (clean.startsWith('0148') || clean.startsWith('5200')) return 'bca';
+  if (clean.startsWith('0148') || clean.startsWith('5200') || clean.startsWith('0140')) return 'bca';
   if (clean.startsWith('6013')) return 'bri';
   if (clean.startsWith('7546')) return 'bni';
   if (clean.startsWith('8801')) return 'kmt';

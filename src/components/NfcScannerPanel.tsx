@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import {
+  AlertCircle,
   Camera,
+  Check,
   CheckCircle2,
   CreditCard,
   Crown,
@@ -12,7 +14,10 @@ import {
   Receipt,
   RefreshCw,
   Smartphone,
+  Sparkles,
   StopCircle,
+  Upload,
+  Usb,
   Wallet,
   X,
 } from 'lucide-react';
@@ -20,12 +25,20 @@ import type {
   CardIssuer,
   EMoneyCard,
   EMoneyTransaction,
+  FlazzAiInsight,
+  FlazzAiParseResponse,
+  FlazzAiStatusResponse,
   NfcScanResult,
   TransactionCategory,
   TransactionType,
 } from '../types';
 import { formatDateTimeId, formatRupiah, ISSUER_META } from '../lib/formatters';
 import { compressImageToDataUrl } from '../lib/imageUtils';
+import {
+  FLAZZ_PROTOCOL_SPEC,
+  isWebUsbSupported,
+  probeUsbCcidFlazzReader,
+} from '../lib/flazzProtocol';
 import {
   getNfcCapabilities,
   inferIssuerFromCardNumberPrefix,
@@ -38,6 +51,7 @@ interface CardTapLookupResult {
   card: EMoneyCard | null;
   transactions: EMoneyTransaction[];
   totalTransactionsCount: number;
+  autoLinkedUid?: boolean;
 }
 
 interface NfcScannerPanelProps {
@@ -45,13 +59,39 @@ interface NfcScannerPanelProps {
   cards: EMoneyCard[];
   transactions: EMoneyTransaction[];
   activeCardId: string | null;
+  flazzAiStatus: FlazzAiStatusResponse | null;
   onSelectCard: (cardId: string) => void;
   onLookupCardByTap: (params: {
     uid?: string;
     cardNumber?: string;
     issuer?: CardIssuer;
+    autoLinkIfSingle?: boolean;
   }) => Promise<CardTapLookupResult>;
+  onAnalyzeFlazzTap: (
+    cardId: string,
+    scanUid?: string,
+    scanSource?: string,
+  ) => Promise<FlazzAiInsight>;
+  onParseFlazzSource: (params: {
+    cardId?: string;
+    imageBase64?: string;
+    mimeType?: string;
+    rawTextOrHex?: string;
+  }) => Promise<FlazzAiParseResponse>;
+  onBatchImportTransactions: (payload: {
+    cardId: string;
+    updatedBalance?: number | null;
+    items: Array<{
+      type: TransactionType;
+      category: TransactionCategory;
+      merchant: string;
+      location: string;
+      amount: number;
+      notes?: string;
+    }>;
+  }) => Promise<number>;
   onLinkCardUid?: (cardId: string, uid: string) => Promise<void>;
+  onUpdateCardBalance?: (cardId: string, balance: number) => Promise<void>;
   onSaveCardFromScan: (payload: {
     uid: string;
     cardNumberFull?: string;
@@ -129,15 +169,21 @@ export function NfcScannerPanel({
   cards,
   transactions,
   activeCardId,
+  flazzAiStatus,
   onSelectCard,
   onLookupCardByTap,
+  onAnalyzeFlazzTap,
+  onParseFlazzSource,
+  onBatchImportTransactions,
   onLinkCardUid,
+  onUpdateCardBalance,
   onSaveCardFromScan,
   onRecordTransaction,
   onDeleteCard,
   onRequireUpgrade,
 }: NfcScannerPanelProps) {
   const caps = getNfcCapabilities();
+  const usbSupported = isWebUsbSupported();
   const [isScanning, setIsScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
   const [scanInfoNote, setScanInfoNote] = useState<string | null>(null);
@@ -158,12 +204,38 @@ export function NfcScannerPanel({
   const [tapCountSession, setTapCountSession] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
 
+  // BCA Flazz AI Key Instant Reader & Mutasi Extractor state
+  const [aiInsight, setAiInsight] = useState<FlazzAiInsight | null>(null);
+  const [aiInsightCardId, setAiInsightCardId] = useState<string | null>(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [parsePanelOpen, setParsePanelOpen] = useState(false);
+  const [parseImage, setParseImage] = useState<string | undefined>(undefined);
+  const [parseRawText, setParseRawText] = useState('');
+  const [parseLoading, setParseLoading] = useState(false);
+  const [parseError, setParseError] = useState<string | null>(null);
+  const [parsedResult, setParsedResult] = useState<FlazzAiParseResponse | null>(null);
+  const [importingParsed, setImportingParsed] = useState(false);
+  const [usbProbing, setUsbProbing] = useState(false);
+
   const [newIssuer, setNewIssuer] = useState<CardIssuer>('bca');
   const [newCardNumber, setNewCardNumber] = useState('');
   const [newLabel, setNewLabel] = useState('BCA Flazz Kunjungan');
   const [newBalance, setNewBalance] = useState('150000');
+  const [tapBalanceOverride, setTapBalanceOverride] = useState('');
   const [savingCard, setSavingCard] = useState(false);
   const [linkingCardId, setLinkingCardId] = useState<string | null>(null);
+
+  const [editingBalance, setEditingBalance] = useState(false);
+  const [balanceDraft, setBalanceDraft] = useState('');
+  const [updatingBalance, setUpdatingBalance] = useState(false);
+  const [syncDiffPrompt, setSyncDiffPrompt] = useState<{
+    cardId: string;
+    prevBalance: number;
+    nextBalance: number;
+    diff: number;
+    type: TransactionType;
+  } | null>(null);
 
   const [txType, setTxType] = useState<TransactionType>('debit');
   const [txCategory, setTxCategory] = useState<TransactionCategory>('tol');
@@ -202,33 +274,66 @@ export function NfcScannerPanel({
     }, 80);
   }
 
+  async function runInstantFlazzAiRead(
+    card: EMoneyCard,
+    scanUid?: string,
+    scanSource?: string,
+  ) {
+    setAiLoading(true);
+    setAiError(null);
+    setAiInsightCardId(card.id);
+    try {
+      const insight = await onAnalyzeFlazzTap(card.id, scanUid || card.uid, scanSource);
+      setAiInsight(insight);
+    } catch (err) {
+      setAiInsight(null);
+      setAiError(
+        err instanceof Error ? err.message : 'Gagal membaca analisis AI Flazz BCA.',
+      );
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
   async function applyDetectedScanResult(result: NfcScanResult, nonNdefNote?: string) {
     setLastScan(result);
     setQuickPreview(null);
     setTapCountSession((n) => n + 1);
 
-    if (result.uid) {
-      try {
-        const lookup = await onLookupCardByTap({ uid: result.uid });
-        if (lookup.found && lookup.card) {
-          setMatchedCard(lookup.card);
-          setLastTapReadAt(new Date().toISOString());
-          onSelectCard(lookup.card.id);
-          setScanInfoNote(null);
-          setFeedbackBanner(
-            `Tap ${ISSUER_META[lookup.card.issuer].name} terbaca otomatis (${lookup.card.uid}) · Saldo ${formatRupiah(lookup.card.balance)} · ${lookup.transactions.length} transaksi dimuat dari sistem.`,
-          );
-          focusResultPanel();
-          return;
+    // Always attempt automatic instant lookup by UID + issuer auto-link for physical Flazz/e-Money
+    try {
+      const lookup = await onLookupCardByTap({
+        uid: result.uid || undefined,
+        issuer: result.issuerGuess,
+        autoLinkIfSingle: result.issuerGuess === 'bca' || Boolean(result.nonNdefChip),
+      });
+      if (lookup.found && lookup.card) {
+        setMatchedCard(lookup.card);
+        setLastTapReadAt(new Date().toISOString());
+        onSelectCard(lookup.card.id);
+        setScanInfoNote(
+          lookup.autoLinkedUid
+            ? `UID kartu fisik (${lookup.card.uid}) otomatis ditautkan ke ${lookup.card.label} untuk tap berikutnya.`
+            : null,
+        );
+        setFeedbackBanner(
+          `Tap ${ISSUER_META[lookup.card.issuer].name} terbaca otomatis · Saldo ${formatRupiah(lookup.card.balance)} · ${lookup.transactions.length} histori pemakaian dimuat instan.`,
+        );
+        focusResultPanel();
+        if (lookup.card.issuer === 'bca') {
+          void runInstantFlazzAiRead(lookup.card, result.uid || lookup.card.uid, result.source);
         }
-      } catch {
-        // Fallback to in-memory card match below
+        return;
       }
+    } catch {
+      // Fallback to in-memory card match below
     }
 
     const existing = result.uid
       ? cards.find((c) => c.uid.toUpperCase() === result.uid.toUpperCase())
-      : undefined;
+      : result.issuerGuess === 'bca'
+        ? cards.find((c) => c.issuer === 'bca')
+        : undefined;
 
     if (existing) {
       setMatchedCard(existing);
@@ -236,26 +341,69 @@ export function NfcScannerPanel({
       onSelectCard(existing.id);
       setScanInfoNote(nonNdefNote || null);
       setFeedbackBanner(
-        `Tap ${ISSUER_META[existing.issuer].name} terbaca (${existing.uid}) · Saldo ${formatRupiah(existing.balance)}.`,
+        `Tap ${ISSUER_META[existing.issuer].name} terbaca instan (${existing.uid}) · Saldo ${formatRupiah(existing.balance)}.`,
       );
-    } else {
-      setMatchedCard(null);
-      setLastTapReadAt(null);
-      setNewIssuer(result.issuerGuess);
-      setNewLabel(`${ISSUER_META[result.issuerGuess].name} Saya`);
-      setNewBalance(String(result.parsedBalance ?? 100000));
-      setScanInfoNote(
-        nonNdefNote ||
-          (result.nonNdefChip
-            ? 'Chip kartu terdeteksi oleh sensor NFC! Hubungkan tap ini ke kartu yang sudah tersimpan di sistem atau simpan sebagai kartu baru.'
-            : null),
-      );
-      setFeedbackBanner(
-        result.uid
-          ? `UID NFC terbaca (${result.uid}). Hubungkan ke kartu di sistem atau simpan sebagai kartu baru.`
-          : 'Kartu non-NDEF terdeteksi! Pilih kartu yang ditempel di sebelah kanan untuk membaca datanya.',
-      );
+      focusResultPanel();
+      if (existing.issuer === 'bca') {
+        void runInstantFlazzAiRead(existing, result.uid || existing.uid, result.source);
+      }
+      return;
     }
+
+    // If no Flazz card is registered in this workspace yet and slot allows, auto-save so tap opens immediately
+    if (
+      (result.issuerGuess === 'bca' || result.nonNdefChip) &&
+      (isPremium || cards.length < 2)
+    ) {
+      try {
+        const autoUid =
+          result.uid ||
+          `FLAZZ-${Math.random().toString(16).slice(2, 6).toUpperCase()}:${Math.random().toString(16).slice(2, 6).toUpperCase()}`;
+        const saved = await onSaveCardFromScan({
+          uid: autoUid,
+          issuer: result.issuerGuess,
+          label:
+            result.issuerGuess === 'bca'
+              ? 'BCA Flazz Tap Otomatis'
+              : `${ISSUER_META[result.issuerGuess].name} Tap`,
+          balance: result.parsedBalance ?? 100000,
+          readSource: result.source,
+        });
+        setMatchedCard(saved);
+        setLastTapReadAt(new Date().toISOString());
+        onSelectCard(saved.id);
+        setScanInfoNote(
+          'Kartu baru langsung tersimpan otomatis. Gunakan "AI Baca Struk / myBCA" jika ingin impor histori pemakaian atau perbarui saldo terakhir.',
+        );
+        setFeedbackBanner(
+          `Kartu ${ISSUER_META[saved.issuer].name} otomatis aktif & siap dibaca (${saved.uid}).`,
+        );
+        focusResultPanel();
+        if (saved.issuer === 'bca') {
+          void runInstantFlazzAiRead(saved, saved.uid, result.source);
+        }
+        return;
+      } catch {
+        // Fall through to registration form if auto-save fails
+      }
+    }
+
+    setMatchedCard(null);
+    setLastTapReadAt(null);
+    setNewIssuer(result.issuerGuess);
+    setNewLabel(`${ISSUER_META[result.issuerGuess].name} Saya`);
+    setNewBalance(String(result.parsedBalance ?? 100000));
+    setScanInfoNote(
+      nonNdefNote ||
+        (result.nonNdefChip
+          ? 'Chip kartu terdeteksi oleh sensor NFC! Hubungkan tap ini ke kartu yang sudah tersimpan di sistem atau simpan sebagai kartu baru.'
+          : null),
+    );
+    setFeedbackBanner(
+      result.uid
+        ? `UID NFC terbaca (${result.uid}). Hubungkan ke kartu di sistem atau simpan sebagai kartu baru.`
+        : 'Kartu non-NDEF terdeteksi! Pilih kartu yang ditempel di sebelah kanan untuk membaca datanya.',
+    );
 
     focusResultPanel();
   }
@@ -330,29 +478,116 @@ export function NfcScannerPanel({
     setScanError(null);
     try {
       const scannedUid = lastScan?.uid?.trim();
+      const prevBal = card.balance;
+      const parsedOverride =
+        tapBalanceOverride.trim() !== '' && !Number.isNaN(Number(tapBalanceOverride))
+          ? Math.max(0, Math.round(Number(tapBalanceOverride)))
+          : null;
+
       if (scannedUid && onLinkCardUid) {
         await onLinkCardUid(card.id, scannedUid);
       }
+      if (parsedOverride !== null && onUpdateCardBalance) {
+        await onUpdateCardBalance(card.id, parsedOverride);
+      }
+
       const lookup = await onLookupCardByTap({
         uid: scannedUid || card.uid,
         cardNumber: card.cardNumberFull,
       });
-      const resolvedCard = lookup.card || card;
+      const resolvedCard = lookup.card || {
+        ...card,
+        balance: parsedOverride ?? card.balance,
+      };
       setMatchedCard(resolvedCard);
       setLastTapReadAt(new Date().toISOString());
       setLastScan(null);
       setScanInfoNote(null);
+      setTapBalanceOverride('');
       onSelectCard(resolvedCard.id);
+
+      if (parsedOverride !== null && parsedOverride !== prevBal) {
+        setSyncDiffPrompt({
+          cardId: resolvedCard.id,
+          prevBalance: prevBal,
+          nextBalance: parsedOverride,
+          diff: Math.abs(prevBal - parsedOverride),
+          type: parsedOverride < prevBal ? 'debit' : 'topup',
+        });
+      }
+
       setFeedbackBanner(
         scannedUid
-          ? `UID ${scannedUid} ditautkan ke ${resolvedCard.label}. Tap berikutnya akan otomatis membaca kartu ini!`
-          : `Data sistem ${ISSUER_META[resolvedCard.issuer].name} (${resolvedCard.label}) berhasil dibaca · Saldo ${formatRupiah(resolvedCard.balance)}.`,
+          ? `UID ${scannedUid} ditautkan ke ${resolvedCard.label} · Saldo ${formatRupiah(resolvedCard.balance)}.`
+          : `Data sistem ${ISSUER_META[resolvedCard.issuer].name} (${resolvedCard.label}) terbaca · Saldo ${formatRupiah(resolvedCard.balance)}.`,
       );
       focusResultPanel();
     } catch (err) {
       setScanError(err instanceof Error ? err.message : 'Gagal membaca kartu');
     } finally {
       setLinkingCardId(null);
+    }
+  }
+
+  async function handleDirectBalanceSync(e: React.FormEvent) {
+    e.preventDefault();
+    if (!selectedCard || !onUpdateCardBalance) return;
+    const parsed = Number(balanceDraft);
+    if (Number.isNaN(parsed) || parsed < 0) return;
+
+    const nextBal = Math.max(0, Math.round(parsed));
+    const prevBal = selectedCard.balance;
+    setUpdatingBalance(true);
+    setScanError(null);
+    try {
+      await onUpdateCardBalance(selectedCard.id, nextBal);
+      setEditingBalance(false);
+      setLastTapReadAt(new Date().toISOString());
+      if (nextBal !== prevBal) {
+        setSyncDiffPrompt({
+          cardId: selectedCard.id,
+          prevBalance: prevBal,
+          nextBalance: nextBal,
+          diff: Math.abs(prevBal - nextBal),
+          type: nextBal < prevBal ? 'debit' : 'topup',
+        });
+      }
+      setFeedbackBanner(
+        `Saldo ${ISSUER_META[selectedCard.issuer].name} diperbarui menjadi ${formatRupiah(nextBal)} dan disinkronkan ke cloud.`,
+      );
+    } catch (err) {
+      setScanError(err instanceof Error ? err.message : 'Gagal memperbarui saldo kartu');
+    } finally {
+      setUpdatingBalance(false);
+    }
+  }
+
+  async function handleRecordBalanceDiff() {
+    if (!syncDiffPrompt || !selectedCard) return;
+    setSubmittingTx(true);
+    setScanError(null);
+    try {
+      await onRecordTransaction({
+        cardId: syncDiffPrompt.cardId,
+        type: syncDiffPrompt.type,
+        category: syncDiffPrompt.type === 'topup' ? 'topup' : txCategory,
+        merchant:
+          syncDiffPrompt.type === 'topup'
+            ? `Top Up ${ISSUER_META[selectedCard.issuer].name}`
+            : txMerchant.trim() || 'Transaksi Tol / Parkir',
+        location: txLocation.trim() || 'Indonesia',
+        amount: syncDiffPrompt.diff,
+        notes: `Sinkron saldo (${formatRupiah(syncDiffPrompt.prevBalance)} → ${formatRupiah(syncDiffPrompt.nextBalance)})`,
+        overrideBalanceAfter: syncDiffPrompt.nextBalance,
+      });
+      setSyncDiffPrompt(null);
+      setFeedbackBanner(
+        `Selisih ${formatRupiah(syncDiffPrompt.diff)} tercatat ke histori mutasi ${ISSUER_META[selectedCard.issuer].name}.`,
+      );
+    } catch (err) {
+      setScanError(err instanceof Error ? err.message : 'Gagal mencatat selisih transaksi');
+    } finally {
+      setSubmittingTx(false);
     }
   }
 
@@ -395,7 +630,11 @@ export function NfcScannerPanel({
     setTapCountSession((n) => n + 1);
 
     try {
-      const lookup = await onLookupCardByTap({ uid: preset.uid });
+      const lookup = await onLookupCardByTap({
+        uid: preset.uid,
+        issuer: preset.issuer,
+        autoLinkIfSingle: true,
+      });
       if (lookup.found && lookup.card) {
         setQuickPreview(null);
         setMatchedCard(lookup.card);
@@ -407,9 +646,12 @@ export function NfcScannerPanel({
         setTxLocation(preset.location);
         setTxAmount(String(preset.amount));
         setFeedbackBanner(
-          `Tap ${ISSUER_META[lookup.card.issuer].name} terbaca otomatis (${lookup.card.uid}) · Saldo ${formatRupiah(lookup.card.balance)} · ${lookup.transactions.length} transaksi dimuat dari sistem.`,
+          `Tap ${ISSUER_META[lookup.card.issuer].name} terbaca otomatis (${lookup.card.uid}) · Saldo ${formatRupiah(lookup.card.balance)} · ${lookup.transactions.length} histori pemakaian dimuat instan.`,
         );
         focusResultPanel();
+        if (lookup.card.issuer === 'bca') {
+          void runInstantFlazzAiRead(lookup.card, preset.uid, 'simulasi');
+        }
         return;
       }
     } catch {
@@ -459,6 +701,91 @@ export function NfcScannerPanel({
       `Tap NFC terbaca otomatis: ${ISSUER_META[card.issuer].name} · Saldo ${formatRupiah(card.balance)}.`,
     );
     focusResultPanel();
+    if (card.issuer === 'bca') {
+      void runInstantFlazzAiRead(card, preset.uid, 'simulasi');
+    }
+  }
+
+  async function handleProbeUsbReader() {
+    setUsbProbing(true);
+    setScanError(null);
+    const res = await probeUsbCcidFlazzReader();
+    setScanInfoNote(res.note);
+    setUsbProbing(false);
+  }
+
+  async function handleParseImageSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setParseError(null);
+    try {
+      const compressed = await compressImageToDataUrl(file);
+      setParseImage(compressed);
+    } catch (err) {
+      setParseError(err instanceof Error ? err.message : 'Gagal membaca file gambar.');
+    }
+  }
+
+  async function handleRunAiSourceParse(e: React.FormEvent) {
+    e.preventDefault();
+    if (!selectedCard) return;
+    setParseLoading(true);
+    setParseError(null);
+    setParsedResult(null);
+    try {
+      const mimeMatch = parseImage?.match(/^data:([^;]+);base64,/);
+      const parsed = await onParseFlazzSource({
+        cardId: selectedCard.id,
+        imageBase64: parseImage,
+        mimeType: mimeMatch?.[1] || 'image/jpeg',
+        rawTextOrHex: parseRawText.trim() || undefined,
+      });
+      setParsedResult(parsed);
+    } catch (err) {
+      setParseError(
+        err instanceof Error ? err.message : 'Gagal mengekstrak mutasi Flazz via AI.',
+      );
+    } finally {
+      setParseLoading(false);
+    }
+  }
+
+  async function handleCommitParsedFlazzTransactions() {
+    if (!selectedCard || !parsedResult) return;
+    setImportingParsed(true);
+    setParseError(null);
+    try {
+      const importedCount = await onBatchImportTransactions({
+        cardId: selectedCard.id,
+        updatedBalance: parsedResult.detectedBalance,
+        items: parsedResult.transactions.map((t) => ({
+          type: t.type,
+          category: t.category,
+          merchant: t.merchant,
+          location: t.location,
+          amount: t.amount,
+          notes: t.notes || (t.timestampHint ? `Waktu struk: ${t.timestampHint}` : undefined),
+        })),
+      });
+      setParsedResult(null);
+      setParseImage(undefined);
+      setParseRawText('');
+      setParsePanelOpen(false);
+      setFeedbackBanner(
+        `AI Key Flazz BCA menyimpan ${importedCount} mutasi pemakaian baru${
+          parsedResult.detectedBalance !== null
+            ? ` & memperbarui saldo menjadi ${formatRupiah(parsedResult.detectedBalance)}`
+            : ''
+        }.`,
+      );
+      void runInstantFlazzAiRead(selectedCard, selectedCard.uid, 'ai_parse');
+    } catch (err) {
+      setParseError(
+        err instanceof Error ? err.message : 'Gagal menyimpan mutasi ke histori kartu.',
+      );
+    } finally {
+      setImportingParsed(false);
+    }
   }
 
   async function handleRegisterUnknownCard(e: React.FormEvent, replaceOldestSlot = false) {
@@ -643,11 +970,50 @@ export function NfcScannerPanel({
 
           <button
             type="button"
-            onClick={() => handleOpenManualPhysicalCard('mandiri')}
+            onClick={() => handleOpenManualPhysicalCard('bca')}
             className="mt-3 text-xs font-semibold text-blue-600 hover:text-blue-700 cursor-pointer"
           >
-            Atau input manual kartu fisik (e-Money / Flazz)
+            Atau input manual kartu fisik (Flazz / e-Money)
           </button>
+
+          {usbSupported && (
+            <button
+              type="button"
+              disabled={usbProbing}
+              onClick={handleProbeUsbReader}
+              className="mt-2 text-[11px] font-medium text-neutral-600 hover:text-neutral-950 inline-flex items-center gap-1.5 cursor-pointer"
+            >
+              <Usb className="w-3.5 h-3.5" />
+              <span>
+                {usbProbing
+                  ? 'Memindai USB Reader...'
+                  : 'Hubungkan Reader USB CCID (Desktop / OTG)'}
+              </span>
+            </button>
+          )}
+        </div>
+
+        {/* Flazz BCA AI Key & AID Protocol Info Strip */}
+        <div className="mt-4 rounded-xl border border-neutral-200 bg-neutral-50/70 px-3.5 py-2.5 flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-[11px] font-bold text-neutral-900 flex items-center gap-1.5">
+              <Sparkles className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+              <span className="truncate">AI Key Flazz BCA · Baca Histori Instan</span>
+            </div>
+            <div className="text-[10px] font-mono text-neutral-500 truncate mt-0.5">
+              AID {FLAZZ_PROTOCOL_SPEC.aidGen1} / {FLAZZ_PROTOCOL_SPEC.aidGen2} ·{' '}
+              {flazzAiStatus?.model || 'gemini-4-hydrogen'}
+            </div>
+          </div>
+          <span
+            className={`text-[10px] font-semibold px-2 py-0.5 rounded-md border shrink-0 ${
+              flazzAiStatus?.configured
+                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                : 'bg-amber-50 text-amber-800 border-amber-200'
+            }`}
+          >
+            {flazzAiStatus?.configured ? 'AI Key Aktif' : 'Perlu Secret Key'}
+          </span>
         </div>
 
         {scanError && (
@@ -806,15 +1172,31 @@ export function NfcScannerPanel({
             </div>
 
             {availableCards.length > 0 && (
-              <div className="mt-4 rounded-xl border border-blue-200 bg-blue-50/70 p-4 space-y-2.5">
+              <div className="mt-4 rounded-xl border border-blue-200 bg-blue-50/70 p-4 space-y-3">
                 <div className="text-xs font-bold text-blue-950 flex items-center gap-1.5">
                   <Link2 className="w-4 h-4 text-blue-600" />
                   <span>
                     {lastScan.uid
                       ? 'Hubungkan Tap UID ini ke Kartu di Sistem (Tap berikutnya otomatis terbaca):'
-                      : 'Pilih kartu yang baru ditempel untuk membaca saldo & mutasi dari sistem:'}
+                      : 'Pilih kartu yang baru ditempel untuk membaca & update saldo di sistem:'}
                   </span>
                 </div>
+
+                <div>
+                  <label className="block text-[11px] font-semibold text-blue-900 mb-1">
+                    Update Saldo Terbaca (Rp · opsional — dari struk/myBCA/Livin)
+                  </label>
+                  <input
+                    type="number"
+                    min={0}
+                    step={500}
+                    value={tapBalanceOverride}
+                    onChange={(e) => setTapBalanceOverride(e.target.value)}
+                    placeholder="Kosongkan untuk pakai saldo tersimpan di sistem"
+                    className="w-full min-h-[40px] px-3 rounded-xl border border-blue-200 bg-white text-xs font-mono tabular-nums text-slate-900 focus:outline-none focus:border-blue-600"
+                  />
+                </div>
+
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   {availableCards.map((c) => (
                     <button
@@ -981,36 +1363,312 @@ export function NfcScannerPanel({
               )}
             </div>
 
-            {/* Selected Card Summary Strip */}
-            <div className="mt-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 rounded-xl bg-slate-50 border border-slate-200">
-              <div className="flex items-center gap-3 min-w-0">
-                <div className="w-10 h-10 rounded-xl bg-slate-900 text-white flex items-center justify-center shrink-0">
-                  <CreditCard className="w-5 h-5" />
-                </div>
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-sm font-bold text-slate-900 truncate">
-                      {ISSUER_META[selectedCard.issuer].name} · {selectedCard.label}
-                    </span>
-                    {lastTapReadAt && (
-                      <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md">
-                        Terbaca Otomatis
+            {/* Selected Card Summary Strip + Direct Balance Update */}
+            <div className="mt-4 p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-10 h-10 rounded-xl bg-slate-900 text-white flex items-center justify-center shrink-0">
+                    <CreditCard className="w-5 h-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-bold text-slate-900 truncate">
+                        {ISSUER_META[selectedCard.issuer].name} · {selectedCard.label}
                       </span>
-                    )}
-                  </div>
-                  <div className="text-xs text-slate-500 font-mono tabular-nums truncate mt-0.5">
-                    {selectedCard.cardNumberMasked} · UID {selectedCard.uid} · Update{' '}
-                    {formatDateTimeId(selectedCard.lastTappedAt)}
+                      {lastTapReadAt && (
+                        <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md">
+                          Terbaca Otomatis
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs text-slate-500 font-mono tabular-nums truncate mt-0.5">
+                      {selectedCard.cardNumberMasked} · UID {selectedCard.uid} · Update{' '}
+                      {formatDateTimeId(selectedCard.lastTappedAt)}
+                    </div>
                   </div>
                 </div>
-              </div>
-              <div className="sm:text-right shrink-0">
-                <div className="text-[11px] text-slate-500">Saldo Tersimpan di Sistem</div>
-                <div className="text-xl font-bold font-mono tabular-nums text-slate-900">
-                  {formatRupiah(selectedCard.balance)}
+                <div className="sm:text-right shrink-0">
+                  <div className="text-[11px] text-slate-500">Saldo Tersimpan di Sistem</div>
+                  <div className="text-xl font-bold font-mono tabular-nums text-slate-900">
+                    {formatRupiah(selectedCard.balance)}
+                  </div>
+                  {onUpdateCardBalance && !editingBalance && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setBalanceDraft(String(selectedCard.balance));
+                        setEditingBalance(true);
+                      }}
+                      className="mt-1 text-[11px] font-semibold text-blue-600 hover:text-blue-700 cursor-pointer"
+                    >
+                      Perbarui Saldo Kartu
+                    </button>
+                  )}
                 </div>
               </div>
+
+              {editingBalance && onUpdateCardBalance && (
+                <form
+                  onSubmit={handleDirectBalanceSync}
+                  className="pt-3 border-t border-slate-200 flex flex-wrap items-center gap-2"
+                >
+                  <input
+                    type="number"
+                    min={0}
+                    step={500}
+                    value={balanceDraft}
+                    onChange={(e) => setBalanceDraft(e.target.value)}
+                    placeholder="Saldo terkini (Rp)"
+                    required
+                    className="flex-1 min-w-[160px] min-h-[40px] px-3 rounded-xl border border-slate-300 bg-white text-sm font-mono tabular-nums text-slate-950 focus:outline-none focus:border-blue-600"
+                  />
+                  <button
+                    type="submit"
+                    disabled={updatingBalance}
+                    className="min-h-[40px] px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold cursor-pointer"
+                  >
+                    {updatingBalance ? 'Menyimpan...' : 'Simpan Saldo'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditingBalance(false)}
+                    className="min-h-[40px] px-3 py-2 rounded-xl border border-slate-200 bg-white text-xs font-medium text-slate-600 cursor-pointer"
+                  >
+                    Batal
+                  </button>
+                </form>
+              )}
+
+              {syncDiffPrompt && syncDiffPrompt.cardId === selectedCard.id && (
+                <div className="pt-3 border-t border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                  <span className="text-slate-700">
+                    Terdeteksi selisih saldo{' '}
+                    <strong className="font-mono text-slate-950">
+                      {syncDiffPrompt.type === 'debit' ? '-' : '+'}
+                      {formatRupiah(syncDiffPrompt.diff)}
+                    </strong>
+                    . Catat otomatis ke histori transaksi?
+                  </span>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      disabled={submittingTx}
+                      onClick={handleRecordBalanceDiff}
+                      className="min-h-[34px] px-3 py-1.5 rounded-lg bg-neutral-950 text-white text-[11px] font-semibold cursor-pointer"
+                    >
+                      {syncDiffPrompt.type === 'debit'
+                        ? 'Catat Pengeluaran'
+                        : 'Catat Top Up'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSyncDiffPrompt(null)}
+                      className="min-h-[34px] px-2.5 py-1.5 rounded-lg text-[11px] text-slate-500 hover:text-slate-900 cursor-pointer"
+                    >
+                      Lewati
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
+
+            {/* AI Key Flazz BCA Instant Usage Reader & Mutasi Extractor */}
+            {(selectedCard.issuer === 'bca' || (aiInsight && aiInsightCardId === selectedCard.id)) && (
+              <div className="mt-4 rounded-xl border border-blue-200 bg-blue-50/50 p-4 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div className="w-7 h-7 rounded-lg bg-blue-600 text-white flex items-center justify-center shrink-0">
+                      <Sparkles className="w-4 h-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold text-neutral-950 truncate">
+                        AI Key Flazz BCA — Pembaca Histori Pemakaian Instan
+                      </div>
+                      <div className="text-[10px] font-mono text-neutral-600 truncate">
+                        {FLAZZ_PROTOCOL_SPEC.standard} · AID {FLAZZ_PROTOCOL_SPEC.aidGen1}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      disabled={aiLoading}
+                      onClick={() =>
+                        runInstantFlazzAiRead(selectedCard, selectedCard.uid, 'manual_ai_refresh')
+                      }
+                      className="min-h-[32px] px-2.5 py-1 rounded-lg border border-blue-200 bg-white hover:bg-blue-50 text-[11px] font-semibold text-blue-700 inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <RefreshCw className={`w-3 h-3 ${aiLoading ? 'animate-spin' : ''}`} />
+                      <span>{aiLoading ? 'Membaca AI...' : 'Baca Ulang AI'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setParsePanelOpen((prev) => !prev);
+                        setParseError(null);
+                      }}
+                      className="min-h-[32px] px-2.5 py-1 rounded-lg bg-neutral-950 hover:bg-neutral-800 text-white text-[11px] font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Upload className="w-3 h-3" />
+                      <span>{parsePanelOpen ? 'Tutup Ekstraktor' : 'AI Baca Struk / myBCA'}</span>
+                    </button>
+                  </div>
+                </div>
+
+                {aiLoading && (
+                  <div className="rounded-lg border border-blue-200 bg-white px-3 py-2.5 text-xs text-blue-900 flex items-center gap-2">
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin text-blue-600 shrink-0" />
+                    <span>Menganalisis saldo & histori pemakaian BCA Flazz via AI Key...</span>
+                  </div>
+                )}
+
+                {aiError && !aiLoading && (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-950 flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                    <span>{aiError}</span>
+                  </div>
+                )}
+
+                {aiInsight && aiInsightCardId === selectedCard.id && !aiLoading && (
+                  <div className="rounded-lg border border-blue-100 bg-white p-3.5 space-y-2.5">
+                    <p className="text-xs font-medium text-neutral-900 leading-relaxed">
+                      {aiInsight.ringkasanInstan}
+                    </p>
+                    {aiInsight.sorotanPemakaian.length > 0 && (
+                      <ul className="space-y-1 text-[11px] text-neutral-700">
+                        {aiInsight.sorotanPemakaian.map((point, idx) => (
+                          <li key={idx} className="flex items-start gap-1.5">
+                            <Check className="w-3.5 h-3.5 text-blue-600 shrink-0 mt-0.5" />
+                            <span>{point}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    <div className="pt-2 border-t border-neutral-100 flex flex-wrap items-center justify-between gap-2 text-[11px] text-neutral-500">
+                      <span>{aiInsight.rekomendasiReimburse}</span>
+                      <span className="font-mono text-[10px] text-neutral-400">
+                        {aiInsight.protocolVerdict}
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {parsePanelOpen && (
+                  <form
+                    onSubmit={handleRunAiSourceParse}
+                    className="rounded-lg border border-blue-200 bg-white p-3.5 space-y-3"
+                  >
+                    <div className="text-xs font-semibold text-neutral-900">
+                      Ekstrak Histori & Saldo Flazz Otomatis (Foto Struk EDC / Screenshot myBCA / Log APDU)
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <label className="min-h-[42px] px-3 py-2 rounded-lg border border-neutral-200 bg-neutral-50 hover:bg-neutral-100 text-xs font-medium text-neutral-800 flex items-center justify-between gap-2 cursor-pointer">
+                        <span className="inline-flex items-center gap-2 truncate">
+                          <Camera className="w-4 h-4 text-blue-600 shrink-0" />
+                          <span className="truncate">
+                            {parseImage ? 'Gambar Siap Dianalisis' : 'Pilih Foto Struk / myBCA'}
+                          </span>
+                        </span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          onChange={handleParseImageSelect}
+                          className="sr-only"
+                        />
+                        {parseImage && (
+                          <button
+                            type="button"
+                            onClick={(ev) => {
+                              ev.preventDefault();
+                              setParseImage(undefined);
+                            }}
+                            className="text-neutral-400 hover:text-red-600"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </label>
+
+                      <button
+                        type="submit"
+                        disabled={parseLoading || (!parseImage && !parseRawText.trim())}
+                        className="min-h-[42px] px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-semibold inline-flex items-center justify-center gap-2 cursor-pointer"
+                      >
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>{parseLoading ? 'Mengekstrak...' : 'Baca Mutasi via AI Key'}</span>
+                      </button>
+                    </div>
+
+                    <textarea
+                      rows={2}
+                      value={parseRawText}
+                      onChange={(e) => setParseRawText(e.target.value)}
+                      placeholder="Atau tempel catatan mutasi myBCA Flazz / log APDU hex (contoh: Tol Cikarang Rp 27.000, Saldo Rp 115.000)..."
+                      className="w-full px-3 py-2 rounded-lg border border-neutral-200 bg-white text-xs text-neutral-900 focus:outline-none focus:border-blue-600"
+                    />
+
+                    {parseError && (
+                      <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">
+                        {parseError}
+                      </div>
+                    )}
+
+                    {parsedResult && (
+                      <div className="rounded-lg border border-emerald-200 bg-emerald-50/70 p-3 space-y-2.5">
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                          <span className="font-semibold text-emerald-950">
+                            {parsedResult.summary}
+                          </span>
+                          {parsedResult.detectedBalance !== null && (
+                            <span className="font-mono font-bold text-emerald-800">
+                              Saldo Terbaca: {formatRupiah(parsedResult.detectedBalance)}
+                            </span>
+                          )}
+                        </div>
+                        {parsedResult.transactions.length > 0 && (
+                          <div className="divide-y divide-emerald-200/70 bg-white rounded-md border border-emerald-200">
+                            {parsedResult.transactions.map((item, idx) => (
+                              <div
+                                key={idx}
+                                className="px-3 py-2 flex items-center justify-between gap-2 text-xs"
+                              >
+                                <div className="min-w-0">
+                                  <div className="font-semibold text-neutral-900 truncate">
+                                    {item.merchant}
+                                  </div>
+                                  <div className="text-[10px] text-neutral-500">
+                                    {item.location} · {item.category}
+                                  </div>
+                                </div>
+                                <div className="font-mono font-bold text-neutral-950 shrink-0">
+                                  {item.type === 'topup' ? '+' : '-'}
+                                  {formatRupiah(item.amount)}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        <button
+                          type="button"
+                          disabled={importingParsed}
+                          onClick={handleCommitParsedFlazzTransactions}
+                          className="min-h-[38px] px-4 py-1.5 rounded-lg bg-neutral-950 hover:bg-neutral-800 text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>
+                            {importingParsed
+                              ? 'Menyimpan...'
+                              : `Simpan ${parsedResult.transactions.length} Transaksi${
+                                  parsedResult.detectedBalance !== null ? ' & Update Saldo' : ''
+                                } ke Histori Flazz`}
+                          </span>
+                        </button>
+                      </div>
+                    )}
+                  </form>
+                )}
+              </div>
+            )}
 
             {/* Live Card Transaction History Automatically Read From System */}
             <div className="mt-4 rounded-xl border border-slate-200 bg-white overflow-hidden">
